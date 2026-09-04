@@ -71,21 +71,48 @@ function applyFilters(wglInstance) {
   // texture first, then reapply the *entire* current filter stack — otherwise
   // edits compound on top of the previous frame's output instead of the base image.
   wglInstance.loadImage();
-  if (state.sonyLook) {
-    wglInstance.filterCurves([SONY_ALPHA_LIKE_CURVE, null, null, null]);
-  }
+
+  // Order matters, and this mirrors how Lightroom/ACR structure it:
+  //
+  // 1. Exposure first, in linear light (mathematically what "stops" means), with a
+  //    soft highlight roll-off instead of a hard clamp — mini-gl's own filterAdjustments
+  //    bakes exposure into the same color-matrix pass that ends with clamp(0,1), so
+  //    pushing exposure there clips highlights to flat white *before* highlight/shadow
+  //    recovery ever runs, making them structurally unrecoverable. Doing exposure as
+  //    its own pass first, with a smooth compression above a knee, avoids that.
+  wglInstance.filterExposure(state.exposure);
+
+  // 2. Highlight/shadow recovery next, while the signal is still well-behaved.
+  wglInstance.filterHighlightsShadows(state.highlights, -state.shadows);
+
+  // 3. Remaining "basic" adjustments (still linear light) — note: no exposure here,
+  //    it's handled above.
   wglInstance.filterAdjustments({
-    exposure: state.exposure,
     saturation: state.saturation,
     temperature: state.temperature,
     vibrance: state.vibrance,
     clarity: state.clarity,
     vignette: state.vignette,
   });
-  wglInstance.filterHighlightsShadows(state.highlights, -state.shadows);
-  if (state.contrast) {
-    wglInstance.filterCurves([contrastCurvePoints(state.contrast), null, null, null]);
+
+  // 4. Tone curves (base "look" curve, parametric contrast curve) are conventionally
+  //    designed against display-referred (gamma-encoded) values — Lightroom's Tone
+  //    Curve panel and darktable's base curve both work this way. Applying them
+  //    directly to our linear pipeline data would distort them (a curve point at 0.25
+  //    means something very different in linear vs. gamma light), so bracket with an
+  //    explicit space conversion.
+  if (state.sonyLook || state.contrast) {
+    wglInstance.filterToGamma();
+    if (state.sonyLook) {
+      wglInstance.filterCurves([SONY_ALPHA_LIKE_CURVE, null, null, null]);
+    }
+    if (state.contrast) {
+      wglInstance.filterCurves([contrastCurvePoints(state.contrast), null, null, null]);
+    }
+    wglInstance.filterToLinear();
   }
+
+  // 5. Creative/cosmetic effects last, back in linear light.
   if (state.bloom) {
     wglInstance.filterBloom(state.bloom);
   }

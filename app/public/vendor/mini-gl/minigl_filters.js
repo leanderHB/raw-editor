@@ -7,6 +7,8 @@ export { filterPerspective } from './filters/filterPerspective.js'
 export { filterBlend } from './filters/filterBlend.js'
 export { filterBlurBokeh } from './filters/filterBlurBokeh.js'
 export { filterBlurGaussian } from './filters/filterBlurGaussian.js'
+export { filterExposure } from './filters/filterExposure.js'
+export { filterToGamma, filterToLinear } from './filters/filterColorSpace.js'
 
 
 export function filterAdjustments(mini, effects) {
