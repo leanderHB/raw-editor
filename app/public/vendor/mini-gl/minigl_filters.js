@@ -9,6 +9,7 @@ export { filterBlurBokeh } from './filters/filterBlurBokeh.js'
 export { filterBlurGaussian } from './filters/filterBlurGaussian.js'
 export { filterExposure } from './filters/filterExposure.js'
 export { filterToGamma, filterToLinear } from './filters/filterColorSpace.js'
+export { filterDefringe } from './filters/filterDefringe.js'
 
 
 export function filterAdjustments(mini, effects) {

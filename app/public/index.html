@@ -18,6 +18,11 @@
   .slider { margin-bottom: 18px; }
   .slider label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
   .slider input { width: 100%; }
+  .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin: 0 0 10px; border-top: 1px solid #333; padding-top: 14px; }
+  .section-title:first-child { border-top: none; padding-top: 0; }
+  #curveWrap { position: relative; width: 220px; height: 150px; margin: 0 auto 6px; background-image: radial-gradient(#444 1px, transparent 0); background-size: 10% 10%; background-color: #1a1a1a; border: 1px solid #444; border-radius: 6px; touch-action: none; }
+  #curveCanvas { position: absolute; inset: 0; }
+  .curve-hint { font-size: 11px; color: #777; text-align: center; margin-bottom: 16px; }
 </style>
 </head>
 <body>
@@ -26,6 +31,7 @@
   <input id="fileInput" type="file" accept=".arw,.ARW" style="display:none">
   <button id="exportBtn" disabled>Export…</button>
   <button id="resetBtn" disabled>Reset</button>
+  <button id="rotate90Btn" disabled title="Rotate 90° clockwise">⟳ 90°</button>
   <label style="display:flex;align-items:center;gap:4px;font-size:13px;margin-left:8px;">
     <input id="sonyLook" type="checkbox"> Sony Look
   </label>
@@ -34,16 +40,30 @@
 <div id="layout">
   <div id="canvasWrap"><span id="placeholder">Open a .ARW file to begin</span></div>
   <div id="panel">
+    <div class="section-title">Geometry</div>
+    <div class="slider"><label><span>Straighten</span><span id="straightenVal">0.00</span></label><input id="straighten" type="range" min="-45" max="45" step="0.1" value="0"></div>
+
+    <div class="section-title">Tone Curve</div>
+    <div id="curveWrap">
+      <canvas id="curveCanvas" width="220" height="150"></canvas>
+    </div>
+    <div class="curve-hint">click to add a point · double-click a point to remove it · drag the end points to clip</div>
+
+    <div class="section-title">Light &amp; Color</div>
     <div class="slider"><label><span>Exposure</span><span id="exposureVal">0.00</span></label><input id="exposure" type="range" min="-2" max="2" step="0.01" value="0"></div>
     <div class="slider"><label><span>Contrast</span><span id="contrastVal">0.00</span></label><input id="contrast" type="range" min="-1" max="1" step="0.01" value="0"></div>
     <div class="slider"><label><span>Saturation</span><span id="saturationVal">0.00</span></label><input id="saturation" type="range" min="-1" max="1" step="0.01" value="0"></div>
     <div class="slider"><label><span>Temperature</span><span id="temperatureVal">0.00</span></label><input id="temperature" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Tint</span><span id="tintVal">0.00</span></label><input id="tint" type="range" min="-1" max="1" step="0.01" value="0"></div>
     <div class="slider"><label><span>Vibrance</span><span id="vibranceVal">0.00</span></label><input id="vibrance" type="range" min="-1" max="1" step="0.01" value="0"></div>
     <div class="slider"><label><span>Highlights</span><span id="highlightsVal">0.00</span></label><input id="highlights" type="range" min="-1" max="1" step="0.01" value="0"></div>
     <div class="slider"><label><span>Shadows</span><span id="shadowsVal">0.00</span></label><input id="shadows" type="range" min="-1" max="1" step="0.01" value="0"></div>
+
+    <div class="section-title">Detail &amp; Effects</div>
     <div class="slider"><label><span>Clarity</span><span id="clarityVal">0.00</span></label><input id="clarity" type="range" min="-1" max="1" step="0.01" value="0"></div>
     <div class="slider"><label><span>Vignette</span><span id="vignetteVal">0.00</span></label><input id="vignette" type="range" min="0" max="1" step="0.01" value="0"></div>
     <div class="slider"><label><span>Bloom</span><span id="bloomVal">0.00</span></label><input id="bloom" type="range" min="0" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Anti-aberration</span><span id="defringeVal">0.00</span></label><input id="defringe" type="range" min="0" max="1" step="0.01" value="0"></div>
   </div>
 </div>
 <script type="module" src="./app.js"></script>

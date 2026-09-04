@@ -1,5 +1,5 @@
 import LibRaw from '/node_modules/libraw-wasm/dist/index.js';
-import { minigl } from '/vendor/mini-gl/minigl.js';
+import { minigl, Spline } from '/vendor/mini-gl/minigl.js';
 
 const statusEl = document.getElementById('status');
 const setStatus = (s) => { statusEl.textContent = s; };
@@ -8,9 +8,10 @@ const openBtn = document.getElementById('openBtn');
 const fileInput = document.getElementById('fileInput');
 const exportBtn = document.getElementById('exportBtn');
 const resetBtn = document.getElementById('resetBtn');
+const rotate90Btn = document.getElementById('rotate90Btn');
 const canvasWrap = document.getElementById('canvasWrap');
 
-const SLIDER_KEYS = ['exposure', 'contrast', 'saturation', 'temperature', 'vibrance', 'highlights', 'shadows', 'clarity', 'vignette', 'bloom'];
+const SLIDER_KEYS = ['straighten', 'exposure', 'contrast', 'saturation', 'temperature', 'tint', 'vibrance', 'highlights', 'shadows', 'clarity', 'vignette', 'bloom', 'defringe'];
 const state = Object.fromEntries(SLIDER_KEYS.map((k) => [k, 0]));
 state.sonyLook = false;
 
@@ -29,6 +30,124 @@ const SONY_ALPHA_LIKE_CURVE = [
   [0.855738, 0.983468],
   [1, 1],
 ];
+
+// --- Tone curve editor ---------------------------------------------------
+// A single value/luminance curve (no separate R/G/B channels) — click empty
+// space to add a point, double-click a point to remove it, drag the end
+// points (locked to x=0/x=1) to raise the black point or lower the white
+// point, which is how you get the "clip highs/lows" look.
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+const IDENTITY_CURVE = () => [[0, 0], [1, 1]];
+let curvePoints = IDENTITY_CURVE();
+
+const curveCanvas = document.getElementById('curveCanvas');
+const curveCtx = curveCanvas.getContext('2d');
+const CURVE_W = curveCanvas.width;
+const CURVE_H = curveCanvas.height;
+const CURVE_POINT_R = 5;
+const CURVE_HIT_R = 10;
+
+function curveToCanvas([x, y]) {
+  return [x * CURVE_W, CURVE_H - y * CURVE_H];
+}
+function canvasToCurve(cx, cy) {
+  return [clamp01(cx / CURVE_W), clamp01(1 - cy / CURVE_H)];
+}
+function isCurveIdentity() {
+  return curvePoints.length === 2
+    && curvePoints[0][0] === 0 && curvePoints[0][1] === 0
+    && curvePoints[1][0] === 1 && curvePoints[1][1] === 1;
+}
+function resetCurve() {
+  curvePoints = IDENTITY_CURVE();
+  drawCurve();
+}
+function findCurvePointNear(cx, cy) {
+  for (let i = 0; i < curvePoints.length; i++) {
+    const [px, py] = curveToCanvas(curvePoints[i]);
+    if (Math.hypot(px - cx, py - cy) <= CURVE_HIT_R) return i;
+  }
+  return null;
+}
+function drawCurve() {
+  curveCtx.clearRect(0, 0, CURVE_W, CURVE_H);
+
+  // draw with the exact same spline the GPU shader evaluates (filterCurves uses this
+  // same Spline class internally), so the preview line matches the real result.
+  const spline = new Spline(curvePoints.map((p) => [...p]));
+  curveCtx.strokeStyle = '#8ec9ff';
+  curveCtx.lineWidth = 2;
+  curveCtx.beginPath();
+  for (let i = 0; i <= CURVE_W; i++) {
+    const x = i / CURVE_W;
+    const y = clamp01(spline.at(x));
+    const [cx, cy] = curveToCanvas([x, y]);
+    if (i === 0) curveCtx.moveTo(cx, cy); else curveCtx.lineTo(cx, cy);
+  }
+  curveCtx.stroke();
+
+  curveCtx.fillStyle = '#fff';
+  for (const p of curvePoints) {
+    const [cx, cy] = curveToCanvas(p);
+    curveCtx.beginPath();
+    curveCtx.arc(cx, cy, CURVE_POINT_R, 0, Math.PI * 2);
+    curveCtx.fill();
+  }
+}
+
+let curveDragIndex = null;
+curveCanvas.addEventListener('pointerdown', (e) => {
+  const rect = curveCanvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+  let idx = findCurvePointNear(cx, cy);
+  if (idx === null) {
+    const point = canvasToCurve(cx, cy);
+    curvePoints.push(point);
+    curvePoints.sort((a, b) => a[0] - b[0]);
+    idx = curvePoints.indexOf(point);
+  }
+  curveDragIndex = idx;
+  curveCanvas.setPointerCapture(e.pointerId);
+  drawCurve();
+});
+curveCanvas.addEventListener('pointermove', (e) => {
+  if (curveDragIndex === null) return;
+  const rect = curveCanvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+  let [x, y] = canvasToCurve(cx, cy);
+
+  const isFirst = curveDragIndex === 0;
+  const isLast = curveDragIndex === curvePoints.length - 1;
+  if (isFirst) x = 0;
+  else if (isLast) x = 1;
+  else {
+    const minX = curvePoints[curveDragIndex - 1][0] + 0.02;
+    const maxX = curvePoints[curveDragIndex + 1][0] - 0.02;
+    x = Math.min(maxX, Math.max(minX, x));
+  }
+  curvePoints[curveDragIndex] = [x, y];
+  drawCurve();
+  scheduleRender();
+});
+curveCanvas.addEventListener('pointerup', (e) => {
+  curveDragIndex = null;
+  curveCanvas.releasePointerCapture(e.pointerId);
+});
+curveCanvas.addEventListener('dblclick', (e) => {
+  const rect = curveCanvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+  const idx = findCurvePointNear(cx, cy);
+  if (idx !== null && idx !== 0 && idx !== curvePoints.length - 1) {
+    curvePoints.splice(idx, 1);
+    drawCurve();
+    scheduleRender();
+  }
+});
+drawCurve();
+// ---------------------------------------------------------------------------
 
 const PREVIEW_MAX_DIM = 1800; // interactive edits run against a downscaled proxy; export re-renders at full res
 
@@ -55,7 +174,6 @@ function resetSliders() {
 // drive it with that same S-curve shape rather than using the linear version.
 function contrastCurvePoints(strength) {
   const k = 0.18 * strength; // amplitude at full slider deflection
-  const clamp01 = (v) => Math.min(1, Math.max(0, v));
   return [
     [0, 0],
     [0.25, clamp01(0.25 - k)],
@@ -74,7 +192,31 @@ function applyFilters(wglInstance) {
 
   // Order matters, and this mirrors how Lightroom/ACR structure it:
   //
-  // 1. Exposure first, in linear light (mathematically what "stops" means), with a
+  // 1. Geometry first — straighten (rotate) with an auto-zoom so the frame stays
+  //    fully filled (no empty corners), exactly like Lightroom/Photoshop's
+  //    straighten tool: scale up by however much the rotated frame's bounding box
+  //    exceeds the original, so the crop always shows the maximum content that
+  //    still fills the canvas.
+  if (state.straighten) {
+    const rad = (Math.abs(state.straighten) * Math.PI) / 180;
+    const w = wglInstance.width, h = wglInstance.height;
+    const boundingW = w * Math.cos(rad) + h * Math.sin(rad);
+    const boundingH = w * Math.sin(rad) + h * Math.cos(rad);
+    const zoom = Math.max(boundingW / w - 1, boundingH / h - 1);
+    // filterMatrix's own defaults only kick in when the whole params object is
+    // omitted, not per-key — translateX/Y etc must be passed explicitly or they
+    // come through as undefined and NaN out the entire transform matrix.
+    wglInstance.filterMatrix({ angle: state.straighten, scale: zoom, translateX: 0, translateY: 0, flipv: 0, fliph: 0 });
+  }
+
+  // 2. Anti-aberration cleanup next, on data as close to the original as possible —
+  //    it's detecting a lens/optical artifact (purple/green fringing at high-contrast
+  //    edges), which is easiest to identify before tone-mapping reshapes contrast.
+  if (state.defringe) {
+    wglInstance.filterDefringe(state.defringe);
+  }
+
+  // 3. Exposure, in linear light (mathematically what "stops" means), with a
   //    soft highlight roll-off instead of a hard clamp — mini-gl's own filterAdjustments
   //    bakes exposure into the same color-matrix pass that ends with clamp(0,1), so
   //    pushing exposure there clips highlights to flat white *before* highlight/shadow
@@ -82,7 +224,7 @@ function applyFilters(wglInstance) {
   //    its own pass first, with a smooth compression above a knee, avoids that.
   wglInstance.filterExposure(state.exposure);
 
-  // 2. Highlight/shadow recovery next, while the signal is still well-behaved.
+  // 4. Highlight/shadow recovery next, while the signal is still well-behaved.
   //    Skip the pass entirely when both are untouched — at full export resolution
   //    each of these is a real, non-free full-frame render, not worth paying for
   //    when it would just be an identity transform.
@@ -90,25 +232,27 @@ function applyFilters(wglInstance) {
     wglInstance.filterHighlightsShadows(state.highlights, -state.shadows);
   }
 
-  // 3. Remaining "basic" adjustments (still linear light) — note: no exposure here,
+  // 5. Remaining "basic" adjustments (still linear light) — note: no exposure here,
   //    it's handled above. Same reasoning: skip the pass if every param is neutral.
-  if (state.saturation || state.temperature || state.vibrance || state.clarity || state.vignette) {
+  if (state.saturation || state.temperature || state.tint || state.vibrance || state.clarity || state.vignette) {
     wglInstance.filterAdjustments({
       saturation: state.saturation,
       temperature: state.temperature,
+      tint: state.tint,
       vibrance: state.vibrance,
       clarity: state.clarity,
       vignette: state.vignette,
     });
   }
 
-  // 4. Tone curves (base "look" curve, parametric contrast curve) are conventionally
-  //    designed against display-referred (gamma-encoded) values — Lightroom's Tone
-  //    Curve panel and darktable's base curve both work this way. Applying them
-  //    directly to our linear pipeline data would distort them (a curve point at 0.25
-  //    means something very different in linear vs. gamma light), so bracket with an
-  //    explicit space conversion.
-  if (state.sonyLook || state.contrast) {
+  // 6. Tone curves (base "look" curve, parametric contrast curve, the custom curve
+  //    editor) are conventionally designed against display-referred (gamma-encoded)
+  //    values — Lightroom's Tone Curve panel and darktable's base curve both work
+  //    this way. Applying them directly to our linear pipeline data would distort
+  //    them (a curve point at 0.25 means something very different in linear vs.
+  //    gamma light), so bracket with an explicit space conversion.
+  const curveActive = !isCurveIdentity();
+  if (state.sonyLook || state.contrast || curveActive) {
     wglInstance.filterToGamma();
     if (state.sonyLook) {
       wglInstance.filterCurves([SONY_ALPHA_LIKE_CURVE, null, null, null]);
@@ -116,10 +260,13 @@ function applyFilters(wglInstance) {
     if (state.contrast) {
       wglInstance.filterCurves([contrastCurvePoints(state.contrast), null, null, null]);
     }
+    if (curveActive) {
+      wglInstance.filterCurves([curvePoints, null, null, null]);
+    }
     wglInstance.filterToLinear();
   }
 
-  // 5. Creative/cosmetic effects last, back in linear light.
+  // 7. Creative/cosmetic effects last, back in linear light.
   if (state.bloom) {
     wglInstance.filterBloom(state.bloom);
   }
@@ -190,6 +337,24 @@ function downsampleUint16RGB(data, srcWidth, srcHeight, maxDim) {
   return { data: out, width: dstWidth, height: dstHeight };
 }
 
+// Lossless 90°-clockwise pixel transpose (no resampling, unlike the continuous
+// Straighten slider) — repeated for 180°/270°. Swaps width/height for 90°/270°.
+function rotate90CW(data, width, height) {
+  const out = new Uint16Array(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const srcIdx = (y * width + x) * 3;
+      const nx = height - 1 - y;
+      const ny = x;
+      const dstIdx = (ny * height + nx) * 3;
+      out[dstIdx] = data[srcIdx];
+      out[dstIdx + 1] = data[srcIdx + 1];
+      out[dstIdx + 2] = data[srcIdx + 2];
+    }
+  }
+  return { data: out, width: height, height: width };
+}
+
 for (const key of SLIDER_KEYS) {
   const input = document.getElementById(key);
   const label = document.getElementById(key + 'Val');
@@ -239,6 +404,30 @@ fileInput.addEventListener('change', async () => {
   fileInput.value = '';
 });
 
+// (Re)builds the interactive preview canvas/mini-gl instance from whatever is
+// currently in fullResRaw. Used both right after decoding a file and after a
+// 90° rotation (which changes fullResRaw's dimensions in place).
+function rebuildPreview(keepEdits) {
+  const preview = downsampleUint16RGB(fullResRaw.data, fullResRaw.width, fullResRaw.height, PREVIEW_MAX_DIM);
+  const previewFloatRGBA = uint16RGBToFloatRGBA(preview.data, preview.width, preview.height);
+  const previewImg = { naturalWidth: preview.width, naturalHeight: preview.height, floatData: previewFloatRGBA };
+
+  canvasWrap.innerHTML = '';
+  canvas = document.createElement('canvas');
+  canvas.width = preview.width;
+  canvas.height = preview.height;
+  canvasWrap.appendChild(canvas);
+
+  if (wgl) wgl.destroy();
+  wgl = minigl(canvas, previewImg, 'srgb');
+  wgl.loadImage();
+  if (!keepEdits) {
+    resetSliders();
+    resetCurve();
+  }
+  render();
+}
+
 async function processFile(file) {
   openBtn.disabled = true;
   setStatus(`opening ${file.name}…`);
@@ -248,24 +437,11 @@ async function processFile(file) {
     const { data, meta, width, height, decodeMs } = await decodeArwToRaw(file.data);
     fullResRaw = { data, width, height };
 
-    const preview = downsampleUint16RGB(data, width, height, PREVIEW_MAX_DIM);
-    const previewFloatRGBA = uint16RGBToFloatRGBA(preview.data, preview.width, preview.height);
-    const previewImg = { naturalWidth: preview.width, naturalHeight: preview.height, floatData: previewFloatRGBA };
-
-    canvasWrap.innerHTML = '';
-    canvas = document.createElement('canvas');
-    canvas.width = preview.width;
-    canvas.height = preview.height;
-    canvasWrap.appendChild(canvas);
-
-    if (wgl) wgl.destroy();
-    wgl = minigl(canvas, previewImg, 'srgb');
-    wgl.loadImage();
-    resetSliders();
-    render();
+    rebuildPreview(false);
 
     exportBtn.disabled = false;
     resetBtn.disabled = false;
+    rotate90Btn.disabled = false;
     setStatus(`${meta.camera_model} · ${width}x${height} (editing at ${canvas.width}x${canvas.height}, 16-bit) · decoded in ${decodeMs.toFixed(0)}ms`);
   } catch (err) {
     console.error(err);
@@ -273,6 +449,13 @@ async function processFile(file) {
   } finally {
     openBtn.disabled = false;
   }
+}
+
+function rotate90() {
+  if (!fullResRaw) return;
+  fullResRaw = rotate90CW(fullResRaw.data, fullResRaw.width, fullResRaw.height);
+  rebuildPreview(true); // keep current edits — rotation is a geometry change, not an edit reset
+  setStatus(`rotated to ${fullResRaw.width}x${fullResRaw.height}`);
 }
 
 function exportFile() {
@@ -310,7 +493,8 @@ function exportFile() {
 
 openBtn.addEventListener('click', openFile);
 exportBtn.addEventListener('click', exportFile);
-resetBtn.addEventListener('click', () => { resetSliders(); render(); });
+resetBtn.addEventListener('click', () => { resetSliders(); resetCurve(); render(); });
+rotate90Btn.addEventListener('click', rotate90);
 sonyLookCheckbox.addEventListener('change', () => {
   state.sonyLook = sonyLookCheckbox.checked;
   scheduleRender();
@@ -325,3 +509,4 @@ window.__testSetSlider = (key, val) => {
   input.dispatchEvent(new Event('input'));
 };
 window.__testCapture = () => wgl ? wgl.captureImage('image/jpeg', 0.9).src : null;
+window.__testCurvePoints = () => curvePoints;
