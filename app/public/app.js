@@ -250,7 +250,12 @@ function applyFilters(wglInstance) {
   //    each of these is a real, non-free full-frame render, not worth paying for
   //    when it would just be an identity transform.
   if (state.highlights || state.shadows) {
-    wglInstance.filterHighlightsShadows(state.highlights, -state.shadows);
+    // Both args are negated relative to mini-photo-editor's own reference call,
+    // which I originally copied assuming its slider convention matched ours —
+    // it didn't, on either one. Verified by directly measuring output brightness:
+    // positive Shadows must lift (brighten) shadows and positive Highlights must
+    // recover (darken) highlights, matching Lightroom's convention.
+    wglInstance.filterHighlightsShadows(-state.highlights, state.shadows);
   }
 
   // 5. Remaining "basic" adjustments (still linear light) — note: no exposure here,
