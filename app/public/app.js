@@ -83,17 +83,24 @@ function applyFilters(wglInstance) {
   wglInstance.filterExposure(state.exposure);
 
   // 2. Highlight/shadow recovery next, while the signal is still well-behaved.
-  wglInstance.filterHighlightsShadows(state.highlights, -state.shadows);
+  //    Skip the pass entirely when both are untouched — at full export resolution
+  //    each of these is a real, non-free full-frame render, not worth paying for
+  //    when it would just be an identity transform.
+  if (state.highlights || state.shadows) {
+    wglInstance.filterHighlightsShadows(state.highlights, -state.shadows);
+  }
 
   // 3. Remaining "basic" adjustments (still linear light) — note: no exposure here,
-  //    it's handled above.
-  wglInstance.filterAdjustments({
-    saturation: state.saturation,
-    temperature: state.temperature,
-    vibrance: state.vibrance,
-    clarity: state.clarity,
-    vignette: state.vignette,
-  });
+  //    it's handled above. Same reasoning: skip the pass if every param is neutral.
+  if (state.saturation || state.temperature || state.vibrance || state.clarity || state.vignette) {
+    wglInstance.filterAdjustments({
+      saturation: state.saturation,
+      temperature: state.temperature,
+      vibrance: state.vibrance,
+      clarity: state.clarity,
+      vignette: state.vignette,
+    });
+  }
 
   // 4. Tone curves (base "look" curve, parametric contrast curve) are conventionally
   //    designed against display-referred (gamma-encoded) values — Lightroom's Tone
@@ -272,20 +279,26 @@ function exportFile() {
   if (!wgl || !fullResRaw) return;
   setStatus('rendering full-resolution export…');
 
-  // re-render the whole filter stack against the original full-res 16-bit decode,
-  // not the downscaled preview, so export quality (and radius-based filters like
-  // clarity) isn't limited by the interactive preview's resolution.
+  console.time('export: uint16->float RGBA');
   const fullResFloatRGBA = uint16RGBToFloatRGBA(fullResRaw.data, fullResRaw.width, fullResRaw.height);
+  console.timeEnd('export: uint16->float RGBA');
   const fullResImg = { naturalWidth: fullResRaw.width, naturalHeight: fullResRaw.height, floatData: fullResFloatRGBA };
 
+  console.time('export: minigl create + upload');
   const exportCanvas = document.createElement('canvas');
   exportCanvas.width = fullResRaw.width;
   exportCanvas.height = fullResRaw.height;
   const exportWgl = minigl(exportCanvas, fullResImg, 'srgb');
+  console.timeEnd('export: minigl create + upload');
+
+  console.time('export: applyFilters + paint');
   applyFilters(exportWgl);
   exportWgl.paintCanvas();
+  console.timeEnd('export: applyFilters + paint');
 
+  console.time('export: captureImage (readback+encode)');
   const dataUrl = exportWgl.captureImage('image/jpeg', 0.92).src;
+  console.timeEnd('export: captureImage (readback+encode)');
   exportWgl.destroy();
 
   const a = document.createElement('a');
