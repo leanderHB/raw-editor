@@ -12,7 +12,6 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@xdadda/mini-gl": "^0.1.19",
     "libraw-wasm": "^1.6.0"
   },
   "devDependencies": {

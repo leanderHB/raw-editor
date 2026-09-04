@@ -1,5 +1,5 @@
 import LibRaw from '/node_modules/libraw-wasm/dist/index.js';
-import { minigl } from '/node_modules/@xdadda/mini-gl/dist/mini-gl.js';
+import { minigl } from '/vendor/mini-gl/minigl.js';
 
 const statusEl = document.getElementById('status');
 const setStatus = (s) => { statusEl.textContent = s; };
@@ -35,7 +35,7 @@ const PREVIEW_MAX_DIM = 1800; // interactive edits run against a downscaled prox
 let wgl = null;
 let canvas = null;
 let currentName = 'edited';
-let fullResImageEl = null; // kept only for the final export render
+let fullResRaw = null; // { data: Uint16Array (RGB triplets), width, height } — kept only for the final export render
 
 function resetSliders() {
   for (const key of SLIDER_KEYS) {
@@ -102,22 +102,58 @@ function scheduleRender() {
   if (raf == null) raf = requestAnimationFrame(render);
 }
 
-// draws src into a canvas capped to maxDim on its longest side, returns a loaded <img>
-async function toScaledImage(src, srcWidth, srcHeight, maxDim) {
+// Converts LibRaw's 16-bit RGB output (Uint16Array, 3 channels, values 0..65535) into
+// the RGBA Float32Array (0..1) our patched mini-gl fork uploads directly as a float
+// texture — this is what keeps the full decode precision instead of quantizing to
+// 8-bit through a canvas/<img> roundtrip. Note: the values here are still sRGB-encoded
+// (LibRaw's outputColor:1), not linear — mini-gl's loadImage() does that conversion.
+function uint16RGBToFloatRGBA(data, width, height) {
+  const out = new Float32Array(width * height * 4);
+  for (let i = 0, j = 0; i < data.length; i += 3, j += 4) {
+    out[j] = data[i] / 65535;
+    out[j + 1] = data[i + 1] / 65535;
+    out[j + 2] = data[i + 2] / 65535;
+    out[j + 3] = 1;
+  }
+  return out;
+}
+
+// simple box-average downsample of 16-bit RGB data, capped to maxDim on the longest
+// side — used to build the interactive preview without a second raw decode. Keeps
+// full 16-bit precision (unlike the old canvas/<img>-based downscale).
+function downsampleUint16RGB(data, srcWidth, srcHeight, maxDim) {
   const scale = Math.min(1, maxDim / Math.max(srcWidth, srcHeight));
-  const w = Math.round(srcWidth * scale);
-  const h = Math.round(srcHeight * scale);
-  const scratch = document.createElement('canvas');
-  scratch.width = w;
-  scratch.height = h;
-  scratch.getContext('2d').drawImage(src, 0, 0, w, h);
-  const imageEl = new Image();
-  await new Promise((resolve, reject) => {
-    imageEl.onload = resolve;
-    imageEl.onerror = reject;
-    imageEl.src = scratch.toDataURL('image/png');
-  });
-  return imageEl;
+  if (scale === 1) return { data, width: srcWidth, height: srcHeight };
+
+  const dstWidth = Math.round(srcWidth * scale);
+  const dstHeight = Math.round(srcHeight * scale);
+  const out = new Uint16Array(dstWidth * dstHeight * 3);
+
+  for (let dy = 0; dy < dstHeight; dy++) {
+    const sy0 = Math.floor((dy / dstHeight) * srcHeight);
+    const sy1 = Math.max(sy0 + 1, Math.floor(((dy + 1) / dstHeight) * srcHeight));
+    for (let dx = 0; dx < dstWidth; dx++) {
+      const sx0 = Math.floor((dx / dstWidth) * srcWidth);
+      const sx1 = Math.max(sx0 + 1, Math.floor(((dx + 1) / dstWidth) * srcWidth));
+
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let sy = sy0; sy < sy1; sy++) {
+        let srcIdx = (sy * srcWidth + sx0) * 3;
+        for (let sx = sx0; sx < sx1; sx++, srcIdx += 3) {
+          r += data[srcIdx];
+          g += data[srcIdx + 1];
+          b += data[srcIdx + 2];
+          count++;
+        }
+      }
+      const dstIdx = (dy * dstWidth + dx) * 3;
+      out[dstIdx] = r / count;
+      out[dstIdx + 1] = g / count;
+      out[dstIdx + 2] = b / count;
+    }
+  }
+
+  return { data: out, width: dstWidth, height: dstHeight };
 }
 
 for (const key of SLIDER_KEYS) {
@@ -136,14 +172,15 @@ for (const key of SLIDER_KEYS) {
   });
 }
 
-async function decodeArwToImage(bytes) {
+async function decodeArwToRaw(bytes) {
   setStatus('decoding raw…');
   const t0 = performance.now();
   const raw = new LibRaw();
   await raw.open(bytes, {
     useCameraWb: true,
     outputColor: 1,
-    outputBps: 8,
+    outputBps: 16, // keep the full 16-bit headroom — outputBps:8 would throw away
+                    // sensor precision before any editing even happens
     userQual: 3,
   });
   const meta = await raw.metadata(false);
@@ -151,30 +188,9 @@ async function decodeArwToImage(bytes) {
   raw.dispose();
   const t1 = performance.now();
 
-  const scratch = document.createElement('canvas');
-  scratch.width = img.width;
-  scratch.height = img.height;
-  const ctx = scratch.getContext('2d');
-  const imageData = ctx.createImageData(img.width, img.height);
-  const src = img.data;
-  const dst = imageData.data;
-  for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
-    dst[j] = src[i];
-    dst[j + 1] = src[i + 1];
-    dst[j + 2] = src[i + 2];
-    dst[j + 3] = 255;
-  }
-  ctx.putImageData(imageData, 0, 0);
-
-  const dataUrl = scratch.toDataURL('image/png');
-  const imageEl = new Image();
-  await new Promise((resolve, reject) => {
-    imageEl.onload = resolve;
-    imageEl.onerror = reject;
-    imageEl.src = dataUrl;
-  });
-
-  return { imageEl, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
+  // img.data is a Uint16Array here (3 channels, 0..65535) since outputBps:16 — no
+  // canvas/<img> roundtrip, which would silently clamp everything back to 8-bit.
+  return { data: img.data, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
 }
 
 function openFile() {
@@ -195,26 +211,28 @@ async function processFile(file) {
   currentName = file.name.replace(/\.arw$/i, '') || 'edited';
 
   try {
-    const { imageEl, meta, width, height, decodeMs } = await decodeArwToImage(file.data);
-    fullResImageEl = imageEl;
+    const { data, meta, width, height, decodeMs } = await decodeArwToRaw(file.data);
+    fullResRaw = { data, width, height };
 
-    const previewImageEl = await toScaledImage(imageEl, width, height, PREVIEW_MAX_DIM);
+    const preview = downsampleUint16RGB(data, width, height, PREVIEW_MAX_DIM);
+    const previewFloatRGBA = uint16RGBToFloatRGBA(preview.data, preview.width, preview.height);
+    const previewImg = { naturalWidth: preview.width, naturalHeight: preview.height, floatData: previewFloatRGBA };
 
     canvasWrap.innerHTML = '';
     canvas = document.createElement('canvas');
-    canvas.width = previewImageEl.naturalWidth;
-    canvas.height = previewImageEl.naturalHeight;
+    canvas.width = preview.width;
+    canvas.height = preview.height;
     canvasWrap.appendChild(canvas);
 
     if (wgl) wgl.destroy();
-    wgl = minigl(canvas, previewImageEl, 'srgb');
+    wgl = minigl(canvas, previewImg, 'srgb');
     wgl.loadImage();
     resetSliders();
     render();
 
     exportBtn.disabled = false;
     resetBtn.disabled = false;
-    setStatus(`${meta.camera_model} · ${width}x${height} (editing at ${canvas.width}x${canvas.height}) · decoded in ${decodeMs.toFixed(0)}ms`);
+    setStatus(`${meta.camera_model} · ${width}x${height} (editing at ${canvas.width}x${canvas.height}, 16-bit) · decoded in ${decodeMs.toFixed(0)}ms`);
   } catch (err) {
     console.error(err);
     setStatus('failed to decode: ' + err.message);
@@ -224,16 +242,19 @@ async function processFile(file) {
 }
 
 function exportFile() {
-  if (!wgl || !fullResImageEl) return;
+  if (!wgl || !fullResRaw) return;
   setStatus('rendering full-resolution export…');
 
-  // re-render the whole filter stack against the original full-res decode,
-  // not the downscaled preview, so export quality (and radius-based filters
-  // like clarity) isn't limited by the interactive preview's resolution.
+  // re-render the whole filter stack against the original full-res 16-bit decode,
+  // not the downscaled preview, so export quality (and radius-based filters like
+  // clarity) isn't limited by the interactive preview's resolution.
+  const fullResFloatRGBA = uint16RGBToFloatRGBA(fullResRaw.data, fullResRaw.width, fullResRaw.height);
+  const fullResImg = { naturalWidth: fullResRaw.width, naturalHeight: fullResRaw.height, floatData: fullResFloatRGBA };
+
   const exportCanvas = document.createElement('canvas');
-  exportCanvas.width = fullResImageEl.naturalWidth;
-  exportCanvas.height = fullResImageEl.naturalHeight;
-  const exportWgl = minigl(exportCanvas, fullResImageEl, 'srgb');
+  exportCanvas.width = fullResRaw.width;
+  exportCanvas.height = fullResRaw.height;
+  const exportWgl = minigl(exportCanvas, fullResImg, 'srgb');
   applyFilters(exportWgl);
   exportWgl.paintCanvas();
 
