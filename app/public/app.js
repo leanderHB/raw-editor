@@ -1,5 +1,8 @@
-import LibRaw from '/vendor/libraw-wasm/index.js';
-import { minigl, Spline } from '/vendor/mini-gl/minigl.js';
+// relative, not absolute, paths — this needs to work whether the site is hosted at
+// a domain root (our local dev server) or under a subpath (GitHub Pages project
+// sites are served at https://<user>.github.io/<repo>/, not the domain root).
+import LibRaw from './vendor/libraw-wasm/index.js';
+import { minigl, Spline } from './vendor/mini-gl/minigl.js';
 
 const statusEl = document.getElementById('status');
 const setStatus = (s) => { statusEl.textContent = s; };
