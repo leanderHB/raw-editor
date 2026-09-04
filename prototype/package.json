@@ -1,0 +1,22 @@
+{
+  "name": "prototype",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@xdadda/mini-gl": "^0.1.19",
+    "libraw-wasm": "^1.6.0",
+    "sharp": "^0.35.4",
+    "web-worker": "^1.5.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

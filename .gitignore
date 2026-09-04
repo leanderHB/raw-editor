@@ -1,0 +1,11 @@
+node_modules/
+
+# sample/test raw photos and generated preview images — not source
+*.ARW
+*.arw
+*.jpg
+*.jpeg
+*.png
+
+# editor/OS cruft
+.DS_Store

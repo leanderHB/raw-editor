@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<body>
+<canvas id="c"></canvas>
+<script type="module">
+import LibRaw from '/node_modules/libraw-wasm/dist/index.js';
+
+async function run() {
+  const resp = await fetch('/arwfile/DSC03250.ARW');
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  console.log('fetched bytes:', buf.length, 'status:', resp.status, resp.headers.get('content-length'));
+
+  const raw = new LibRaw();
+  await raw.open(buf, {
+    useCameraWb: true,
+    outputColor: 1,
+    outputBps: 8,
+    userQual: 3,
+  });
+
+  const meta = await raw.metadata(false);
+  const img = await raw.imageData();
+  raw.dispose();
+
+  window.__meta = {
+    make: meta.camera_make,
+    model: meta.camera_model,
+    width: meta.width,
+    height: meta.height,
+    iso: meta.iso_speed,
+    shutter: meta.shutter,
+    aperture: meta.aperture,
+  };
+  window.__imgMeta = { width: img.width, height: img.height, colors: img.colors, bits: img.bits, dataLength: img.data.length };
+
+  const canvas = document.getElementById('c');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(img.width, img.height);
+  const src = img.data; // RGB (3 channels), 8-bit
+  const dst = imageData.data; // RGBA
+  for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
+    dst[j] = src[i];
+    dst[j + 1] = src[i + 1];
+    dst[j + 2] = src[i + 2];
+    dst[j + 3] = 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  window.__dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  window.__done = true;
+}
+
+run().catch(e => {
+  window.__error = e.message + '\n' + e.stack;
+  window.__done = true;
+});
+</script>
+</body>
+</html>

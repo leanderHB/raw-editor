@@ -1,0 +1,176 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ARW edit prototype</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #1a1a1a; color: #eee; }
+  #status { padding: 8px 12px; font-size: 13px; color: #9cf; }
+  #layout { display: flex; height: calc(100vh - 34px); }
+  #canvasWrap { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #111; }
+  canvas { max-width: 100%; max-height: 100%; }
+  #panel { width: 260px; padding: 16px; box-sizing: border-box; background: #222; overflow-y: auto; }
+  .slider { margin-bottom: 18px; }
+  .slider label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+  .slider input { width: 100%; }
+</style>
+</head>
+<body>
+<div id="status">loading…</div>
+<div id="layout">
+  <div id="canvasWrap"><canvas id="c"></canvas></div>
+  <div id="panel">
+    <div class="slider">
+      <label><span>Exposure</span><span id="exposureVal">0.00</span></label>
+      <input id="exposure" type="range" min="-2" max="2" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Contrast</span><span id="contrastVal">0.00</span></label>
+      <input id="contrast" type="range" min="-1" max="1" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Saturation</span><span id="saturationVal">0.00</span></label>
+      <input id="saturation" type="range" min="-1" max="1" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Temperature</span><span id="temperatureVal">0.00</span></label>
+      <input id="temperature" type="range" min="-1" max="1" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Vibrance</span><span id="vibranceVal">0.00</span></label>
+      <input id="vibrance" type="range" min="-1" max="1" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Highlights</span><span id="highlightsVal">0.00</span></label>
+      <input id="highlights" type="range" min="-1" max="1" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Shadows</span><span id="shadowsVal">0.00</span></label>
+      <input id="shadows" type="range" min="-1" max="1" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Clarity</span><span id="clarityVal">0.00</span></label>
+      <input id="clarity" type="range" min="-1" max="1" step="0.01" value="0">
+    </div>
+    <div class="slider">
+      <label><span>Vignette</span><span id="vignetteVal">0.00</span></label>
+      <input id="vignette" type="range" min="0" max="1" step="0.01" value="0">
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import LibRaw from '/node_modules/libraw-wasm/dist/index.js';
+import { minigl } from '/node_modules/@xdadda/mini-gl/dist/mini-gl.js';
+
+const statusEl = document.getElementById('status');
+const setStatus = (s) => { statusEl.textContent = s; console.log(s); };
+
+async function decodeArwToImage(url) {
+  setStatus('fetching raw file…');
+  const resp = await fetch(url);
+  const buf = new Uint8Array(await resp.arrayBuffer());
+
+  setStatus('decoding raw (libraw-wasm)…');
+  const t0 = performance.now();
+  const raw = new LibRaw();
+  await raw.open(buf, {
+    useCameraWb: true,
+    outputColor: 1, // sRGB
+    outputBps: 8,
+    userQual: 3, // AHD demosaic
+  });
+  const meta = await raw.metadata(false);
+  const img = await raw.imageData();
+  raw.dispose();
+  const t1 = performance.now();
+  setStatus(`decoded ${img.width}x${img.height} in ${(t1 - t0).toFixed(0)}ms — rasterizing…`);
+
+  const scratch = document.createElement('canvas');
+  scratch.width = img.width;
+  scratch.height = img.height;
+  const ctx = scratch.getContext('2d');
+  const imageData = ctx.createImageData(img.width, img.height);
+  const src = img.data;
+  const dst = imageData.data;
+  for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
+    dst[j] = src[i];
+    dst[j + 1] = src[i + 1];
+    dst[j + 2] = src[i + 2];
+    dst[j + 3] = 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  const dataUrl = scratch.toDataURL('image/png');
+  const imageEl = new Image();
+  await new Promise((resolve, reject) => {
+    imageEl.onload = resolve;
+    imageEl.onerror = reject;
+    imageEl.src = dataUrl;
+  });
+
+  return { imageEl, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
+}
+
+async function main() {
+  const { imageEl, meta, width, height, decodeMs } = await decodeArwToImage('/arwfile/DSC03250.ARW');
+
+  const canvas = document.getElementById('c');
+  canvas.width = width;
+  canvas.height = height;
+
+  const wgl = minigl(canvas, imageEl, 'srgb');
+  wgl.loadImage();
+
+  const state = { exposure: 0, contrast: 0, saturation: 0, temperature: 0, vibrance: 0, highlights: 0, shadows: 0, clarity: 0, vignette: 0 };
+
+  let raf = null;
+  function render() {
+    wgl.filterAdjustments({
+      exposure: state.exposure,
+      contrast: state.contrast,
+      saturation: state.saturation,
+      temperature: state.temperature,
+      vibrance: state.vibrance,
+      clarity: state.clarity,
+      vignette: state.vignette,
+    });
+    wgl.filterHighlightsShadows(state.highlights, state.shadows);
+    wgl.paintCanvas();
+    raf = null;
+  }
+  function scheduleRender() {
+    if (raf == null) raf = requestAnimationFrame(render);
+  }
+
+  for (const key of Object.keys(state)) {
+    const input = document.getElementById(key);
+    const label = document.getElementById(key + 'Val');
+    input.addEventListener('input', () => {
+      state[key] = parseFloat(input.value);
+      label.textContent = state[key].toFixed(2);
+      scheduleRender();
+    });
+  }
+
+  render();
+  window.__ready = true;
+  window.__setSlider = (key, val) => {
+    const input = document.getElementById(key);
+    input.value = val;
+    input.dispatchEvent(new Event('input'));
+  };
+  window.__captureCanvas = () => wgl.captureImage('image/jpeg', 0.9).src;
+
+  setStatus(`${meta.camera_model} · ${width}x${height} · decoded in ${decodeMs.toFixed(0)}ms · live editing ready`);
+}
+
+main().catch((e) => {
+  setStatus('ERROR: ' + e.message);
+  console.error(e);
+  window.__error = e.message + '\n' + e.stack;
+  window.__ready = true;
+});
+</script>
+</body>
+</html>
