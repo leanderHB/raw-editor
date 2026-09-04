@@ -10,6 +10,8 @@ export { filterBlurGaussian } from './filters/filterBlurGaussian.js'
 export { filterExposure } from './filters/filterExposure.js'
 export { filterToGamma, filterToLinear } from './filters/filterColorSpace.js'
 export { filterDefringe } from './filters/filterDefringe.js'
+export { filterLevels } from './filters/filterLevels.js'
+export { filterDehaze } from './filters/filterDehaze.js'
 
 
 export function filterAdjustments(mini, effects) {

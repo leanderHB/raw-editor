@@ -11,7 +11,7 @@ const resetBtn = document.getElementById('resetBtn');
 const rotate90Btn = document.getElementById('rotate90Btn');
 const canvasWrap = document.getElementById('canvasWrap');
 
-const SLIDER_KEYS = ['straighten', 'exposure', 'contrast', 'saturation', 'temperature', 'tint', 'vibrance', 'highlights', 'shadows', 'clarity', 'vignette', 'bloom', 'defringe'];
+const SLIDER_KEYS = ['straighten', 'exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'saturation', 'temperature', 'tint', 'vibrance', 'clarity', 'dehaze', 'vignette', 'bloom', 'defringe'];
 const state = Object.fromEntries(SLIDER_KEYS.map((k) => [k, 0]));
 state.sonyLook = false;
 
@@ -33,9 +33,12 @@ const SONY_ALPHA_LIKE_CURVE = [
 
 // --- Tone curve editor ---------------------------------------------------
 // A single value/luminance curve (no separate R/G/B channels) — click empty
-// space to add a point, double-click a point to remove it, drag the end
-// points (locked to x=0/x=1) to raise the black point or lower the white
-// point, which is how you get the "clip highs/lows" look.
+// space to add a point, double-click a point to remove it. The end points
+// default to sitting right on the left/right borders (x=0 / x=1); dragging
+// one inward "detaches" it from the border, at which point the segment from
+// the border to that point is drawn (and applied) as a flat straight line at
+// the point's own height — i.e. a hard clip, the same way Photoshop/Lightroom's
+// curve endpoints behave when pulled in from the corner.
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
 const IDENTITY_CURVE = () => [[0, 0], [1, 1]];
 let curvePoints = IDENTITY_CURVE();
@@ -62,6 +65,17 @@ function resetCurve() {
   curvePoints = IDENTITY_CURVE();
   drawCurve();
 }
+// The points actually fed to the spline/GPU: if an end point has detached from
+// its border (x>0 for the first point, x<1 for the last), prepend/append a
+// synthetic point at the border with the SAME y — since both ends of that
+// segment share one y value, the line between them is flat regardless of the
+// spline's shape elsewhere, giving the "straight line to the border" clip look.
+function curveForEval() {
+  const pts = curvePoints.map((p) => [...p]);
+  if (pts[0][0] > 0) pts.unshift([0, pts[0][1]]);
+  if (pts[pts.length - 1][0] < 1) pts.push([1, pts[pts.length - 1][1]]);
+  return pts;
+}
 function findCurvePointNear(cx, cy) {
   for (let i = 0; i < curvePoints.length; i++) {
     const [px, py] = curveToCanvas(curvePoints[i]);
@@ -73,8 +87,9 @@ function drawCurve() {
   curveCtx.clearRect(0, 0, CURVE_W, CURVE_H);
 
   // draw with the exact same spline the GPU shader evaluates (filterCurves uses this
-  // same Spline class internally), so the preview line matches the real result.
-  const spline = new Spline(curvePoints.map((p) => [...p]));
+  // same Spline class internally, fed the same border-augmented points), so the
+  // preview line matches the real result.
+  const spline = new Spline(curveForEval());
   curveCtx.strokeStyle = '#8ec9ff';
   curveCtx.lineWidth = 2;
   curveCtx.beginPath();
@@ -120,9 +135,15 @@ curveCanvas.addEventListener('pointermove', (e) => {
 
   const isFirst = curveDragIndex === 0;
   const isLast = curveDragIndex === curvePoints.length - 1;
-  if (isFirst) x = 0;
-  else if (isLast) x = 1;
-  else {
+  if (isFirst) {
+    // can detach anywhere from the left border up to just short of the next point
+    const maxX = curvePoints.length > 1 ? curvePoints[1][0] - 0.02 : 1;
+    x = Math.min(maxX, Math.max(0, x));
+  } else if (isLast) {
+    // can detach anywhere from the right border down to just past the previous point
+    const minX = curvePoints.length > 1 ? curvePoints[curvePoints.length - 2][0] + 0.02 : 0;
+    x = Math.max(minX, Math.min(1, x));
+  } else {
     const minX = curvePoints[curveDragIndex - 1][0] + 0.02;
     const maxX = curvePoints[curveDragIndex + 1][0] - 0.02;
     x = Math.min(maxX, Math.max(minX, x));
@@ -245,15 +266,24 @@ function applyFilters(wglInstance) {
     });
   }
 
-  // 6. Tone curves (base "look" curve, parametric contrast curve, the custom curve
-  //    editor) are conventionally designed against display-referred (gamma-encoded)
-  //    values — Lightroom's Tone Curve panel and darktable's base curve both work
-  //    this way. Applying them directly to our linear pipeline data would distort
-  //    them (a curve point at 0.25 means something very different in linear vs.
-  //    gamma light), so bracket with an explicit space conversion.
+  // 6. Everything below is conventionally designed against display-referred
+  //    (gamma-encoded) values — Whites/Blacks' clip-point thresholds, Dehaze's
+  //    airlight-color estimate, and the tone curves (base "look", parametric
+  //    contrast, the custom curve editor) all assume numbers like "0.92" mean
+  //    "near white" the way a viewer actually perceives it. Applying them to
+  //    our linear pipeline data instead is the same mistake as before with the
+  //    curves (a value like 0.2 in linear light is a lot brighter than it looks
+  //    gamma-encoded) — first attempt at Whites/Blacks/Dehaze in linear light
+  //    crushed most of the frame to black. So: bracket the whole group.
   const curveActive = !isCurveIdentity();
-  if (state.sonyLook || state.contrast || curveActive) {
+  if (state.whites || state.blacks || state.dehaze || state.sonyLook || state.contrast || curveActive) {
     wglInstance.filterToGamma();
+    // Whites/Blacks: distinct from Highlights/Shadows above — those do a regional
+    // tone-compression recovery, these set the actual clip points (a plain levels remap).
+    wglInstance.filterLevels(state.blacks, state.whites);
+    // Dehaze: a real, working simplified haze-removal model (see filterDehaze.js for
+    // the honest caveat vs. Adobe's per-pixel version).
+    wglInstance.filterDehaze(state.dehaze);
     if (state.sonyLook) {
       wglInstance.filterCurves([SONY_ALPHA_LIKE_CURVE, null, null, null]);
     }
@@ -261,7 +291,7 @@ function applyFilters(wglInstance) {
       wglInstance.filterCurves([contrastCurvePoints(state.contrast), null, null, null]);
     }
     if (curveActive) {
-      wglInstance.filterCurves([curvePoints, null, null, null]);
+      wglInstance.filterCurves([curveForEval(), null, null, null]);
     }
     wglInstance.filterToLinear();
   }
