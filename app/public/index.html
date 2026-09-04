@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>RAW Editor</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #1a1a1a; color: #eee; }
+  #toolbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #262626; border-bottom: 1px solid #000; }
+  #toolbar button { background: #3a3a3a; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+  #toolbar button:hover { background: #454545; }
+  #toolbar button:disabled { opacity: 0.5; cursor: default; }
+  #status { font-size: 13px; color: #9cf; margin-left: 8px; }
+  #layout { display: flex; height: calc(100vh - 46px); }
+  #canvasWrap { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #111; }
+  canvas { max-width: 100%; max-height: 100%; }
+  #placeholder { color: #666; font-size: 15px; }
+  #panel { width: 260px; padding: 16px; box-sizing: border-box; background: #222; overflow-y: auto; }
+  .slider { margin-bottom: 18px; }
+  .slider label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+  .slider input { width: 100%; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button id="openBtn">Open RAW…</button>
+  <input id="fileInput" type="file" accept=".arw,.ARW" style="display:none">
+  <button id="exportBtn" disabled>Export…</button>
+  <button id="resetBtn" disabled>Reset</button>
+  <label style="display:flex;align-items:center;gap:4px;font-size:13px;margin-left:8px;">
+    <input id="sonyLook" type="checkbox"> Sony Look
+  </label>
+  <span id="status">no file open</span>
+</div>
+<div id="layout">
+  <div id="canvasWrap"><span id="placeholder">Open a .ARW file to begin</span></div>
+  <div id="panel">
+    <div class="slider"><label><span>Exposure</span><span id="exposureVal">0.00</span></label><input id="exposure" type="range" min="-2" max="2" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Contrast</span><span id="contrastVal">0.00</span></label><input id="contrast" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Saturation</span><span id="saturationVal">0.00</span></label><input id="saturation" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Temperature</span><span id="temperatureVal">0.00</span></label><input id="temperature" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Vibrance</span><span id="vibranceVal">0.00</span></label><input id="vibrance" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Highlights</span><span id="highlightsVal">0.00</span></label><input id="highlights" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Shadows</span><span id="shadowsVal">0.00</span></label><input id="shadows" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Clarity</span><span id="clarityVal">0.00</span></label><input id="clarity" type="range" min="-1" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Vignette</span><span id="vignetteVal">0.00</span></label><input id="vignette" type="range" min="0" max="1" step="0.01" value="0"></div>
+    <div class="slider"><label><span>Bloom</span><span id="bloomVal">0.00</span></label><input id="bloom" type="range" min="0" max="1" step="0.01" value="0"></div>
+  </div>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
