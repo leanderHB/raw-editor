@@ -11,6 +11,18 @@
   #toolbar button:disabled { opacity: 0.5; cursor: default; }
   #status { font-size: 13px; color: #9cf; margin-left: 8px; }
   #layout { display: flex; height: calc(100vh - 46px); }
+  #sidebar { width: 130px; flex-shrink: 0; background: #1c1c1c; border-right: 1px solid #000; overflow-y: auto; padding: 6px; box-sizing: border-box; }
+  #sidebar.hidden { display: none; }
+  .thumb-item { cursor: pointer; margin-bottom: 6px; border-radius: 4px; padding: 4px; border: 1px solid transparent; }
+  .thumb-item:hover { background: #262626; }
+  .thumb-item.active { border-color: #8ec9ff; background: #263140; }
+  .thumb-item .thumb-img, .thumb-item .thumb-placeholder {
+    width: 100%; aspect-ratio: 3/2; border-radius: 3px; background: #111;
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .thumb-item .thumb-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb-item .thumb-placeholder { color: #555; font-size: 9px; text-align: center; padding: 4px; }
+  .thumb-item .thumb-name { font-size: 9px; color: #999; margin-top: 3px; word-break: break-all; line-height: 1.2; }
   #canvasWrap { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #111; }
   canvas { max-width: 100%; max-height: 100%; }
   #placeholder { color: #666; font-size: 15px; }
@@ -47,8 +59,9 @@
 </head>
 <body>
 <div id="toolbar">
+  <button id="toggleSidebarBtn" title="Show/hide image list">☰</button>
   <button id="openBtn">Open RAW…</button>
-  <input id="fileInput" type="file" accept=".arw,.ARW" style="display:none">
+  <input id="fileInput" type="file" accept=".arw,.ARW" multiple style="display:none">
   <button id="exportBtn" disabled>Export…</button>
   <button id="resetBtn" disabled>Reset</button>
   <button id="rotate90Btn" disabled title="Rotate 90° clockwise">⟳ 90°</button>
@@ -58,7 +71,8 @@
   <span id="status">no file open</span>
 </div>
 <div id="layout">
-  <div id="canvasWrap"><span id="placeholder">Open a .ARW file to begin</span></div>
+  <div id="sidebar"></div>
+  <div id="canvasWrap"><span id="placeholder">Open one or more .ARW files to begin</span></div>
   <div id="panel">
     <div class="section-title">Geometry</div>
     <div class="slider"><label><span>Straighten</span><span id="straightenVal">0.00</span></label><input id="straighten" type="range" min="-45" max="45" step="0.1" value="0"></div>
