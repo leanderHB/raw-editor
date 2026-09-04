@@ -11,9 +11,14 @@
 *    that would otherwise clamp everything back to 8-bit.
 *  - RGBA32F has no automatic sRGB<->linear hardware conversion (unlike
 *    SRGB8_ALPHA8), so loadImage() now runs an explicit toLinear() pass when
-*    loading float source data, and captureImage()/readPixels()/crop() do the
-*    linear->sRGB encode in JS after a float readback instead of relying on
-*    the old implicit 8-bit readback conversion.
+*    loading float source data. For getting pixels back out, rather than
+*    reading back the full float buffer and sRGB-encoding it pixel-by-pixel in
+*    JS (correct, but ~40s on a 24MP image — Math.pow() over ~70M values plus
+*    a 4x larger readback), captureImage()/readPixels()/crop() render one more
+*    pass into a dedicated 8-bit SRGB8_ALPHA8 texture first: hardware does the
+*    linear->sRGB encode for free on write to that format, so the UNSIGNED_BYTE
+*    readback is both correct and fast — same trick the original 8-bit
+*    pipeline relied on throughout, just narrowed to this one output step.
 *  Original: https://github.com/xdadda/mini-gl (MIT license, see LICENSE)
 */
 
@@ -21,24 +26,6 @@ import * as Filters from './minigl_filters.js'
 export {Spline} from './filters/cubicspline.js'
 
 const usesrgb=true //to guarantee gamma correct workflow, SRGB in input - processing is linear - SRGB in output
-
-// mirrors the GLSL fromLinear() function used in shaders — applied here in JS when
-// reading pixels back out of the float pipeline (see linearFloatToSRGB8 below)
-function linearToSrgb(v){ return v <= 0.0031308 ? v*12.92 : 1.055*Math.pow(v,1/2.4)-0.055 }
-
-// converts a linear-light Float32Array (RGBA, 0..1) readback into 8-bit sRGB-encoded
-// pixel data ready for ImageData/canvas — replaces the old implicit conversion that
-// used to happen automatically via the SRGB8_ALPHA8 texture format on readback.
-function linearFloatToSRGB8(floatData){
-  const out = new Uint8ClampedArray(floatData.length)
-  for (let i = 0; i < floatData.length; i += 4) {
-    out[i]   = Math.round(linearToSrgb(floatData[i])   * 255)
-    out[i+1] = Math.round(linearToSrgb(floatData[i+1]) * 255)
-    out[i+2] = Math.round(linearToSrgb(floatData[i+2]) * 255)
-    out[i+3] = Math.round(floatData[i+3] * 255)
-  }
-  return out
-}
 
 export function minigl(canvas,img,colorspace) {
   let gl = canvas.getContext("webgl2",{ antialias:false, premultipliedAlpha: true, })
@@ -93,7 +80,7 @@ export function minigl(canvas,img,colorspace) {
   
   //create two effects' blank textures to handle [image-->shaderA-->txt1-->shaderB-->txt2-->canvas]
   //note: setupFiltersTextures needs to be re-run if canvas width/height change (eg when changing aspect ratio)
-  let textures, count=0;
+  let textures, outputTexture, count=0;
   function setupFiltersTextures(){
     if(textures?.length) textures.forEach(e=>e.destroy())
     textures=[]
@@ -102,14 +89,37 @@ export function minigl(canvas,img,colorspace) {
       const texture = new Texture(gl,gl.canvas.width, gl.canvas.height);
       textures.push(texture);
     }
+    // dedicated 8-bit (SRGB8_ALPHA8) texture used only by crop()/captureImage()/
+    // readPixels() to get pixels out: rendering into an SRGB8_ALPHA8 target does the
+    // linear->sRGB encode for free in hardware, so reading it back with UNSIGNED_BYTE
+    // is both correct and far faster than reading back the full float buffer and
+    // sRGB-encoding ~24M pixels one at a time in JS.
+    outputTexture?.destroy()
+    outputTexture = new Texture(gl, gl.canvas.width, gl.canvas.height, {srgb8:true})
   }
   setupFiltersTextures()
 
   function destroy(){
     if(textures?.length) textures.forEach(e=>e.destroy())
+    outputTexture?.destroy()
     if(croppedTexture) croppedTexture.destroy()
     imageTexture.destroy()
     delete _minigl.img_cropped
+  }
+
+  // renders current_texture (linear) through a plain passthrough shader into the 8-bit
+  // outputTexture — hardware does the linear->sRGB encode on write — then reads back
+  // sRGB-encoded bytes directly, no per-pixel JS conversion needed. Deliberately does
+  // NOT update current_texture/count (unlike runFilter): this is a read-only "peek" at
+  // the current state, not a pipeline step, and current_texture must never be
+  // outputTexture itself (sampling and rendering the same texture at once is invalid).
+  function readSRGB8Bytes(left=0, top=0, width=gl.canvas.width, height=gl.canvas.height){
+    if(current_texture) current_texture.use()
+    outputTexture.drawTo()
+    defaultShader.drawRect()
+    const data = new Uint8Array(width*height*4)
+    gl.readPixels(left,top,width,height,gl.RGBA,gl.UNSIGNED_BYTE,data)
+    return data
   }
 
   let current_texture
@@ -160,14 +170,10 @@ export function minigl(canvas,img,colorspace) {
   let croppedTexture
   let cropsize = {width:0,height:0}
   function crop({left, top, width, height}){
-      const length = width * height * 4;
-      const floatData = new Float32Array(length);
-
       //FIX FOR SAFARI & display-p3 bug (a direct GL->2D drawImage loses colorspace ... this is a workaround)
-      runFilter(defaultShader,{})
-      gl.readPixels(left,top,width,height,gl.RGBA,gl.FLOAT,floatData);
+      const data = readSRGB8Bytes(left, top, width, height)
       const colorspace=gl.unpackColorSpace
-      const imgdata_cropped = new ImageData(linearFloatToSRGB8(floatData), width, height, { colorSpace: colorspace})
+      const imgdata_cropped = new ImageData(new Uint8ClampedArray(data.buffer), width, height, { colorSpace: colorspace})
 
       croppedTexture = new Texture(gl)
       croppedTexture.loadImage(imgdata_cropped)
@@ -192,26 +198,27 @@ export function minigl(canvas,img,colorspace) {
   //quality: Number - between 0 and 1 indicating the image quality to be used with lossy compression
   //returns Image
   function captureImage(type, quality){
-      runFilter(defaultShader,{})
+      const data = readSRGB8Bytes()
       const {width,height}=gl.canvas
-      const length = width * height * 4;
-      const floatData = new Float32Array(length);
-      gl.readPixels(0,0,width,height,gl.RGBA,gl.FLOAT,floatData);
       const colorspace=gl.unpackColorSpace
-      const imgdata = new ImageData(linearFloatToSRGB8(floatData), width, height, { colorSpace: colorspace})
+      const imgdata = new ImageData(new Uint8ClampedArray(data.buffer), width, height, { colorSpace: colorspace})
       return imagedata_to_image(imgdata, colorspace, type,quality)
   }
 
   // returns 8-bit sRGB-encoded pixel bytes (same as before the float patch); pass
   // {raw:true} to get the unconverted linear-light Float32Array straight off the GPU
-  // (e.g. for further high-precision processing) instead.
+  // (e.g. for further high-precision processing) instead — note this path is much
+  // slower (full float readback, no hardware sRGB encode) so only use it when you
+  // actually need linear data.
   function readPixels(opts){
-      runFilter(defaultShader,{})
-      const {width,height}=gl.canvas
-      const length = width * height * 4;
-      const floatData = new Float32Array(length);
-      gl.readPixels(0,0,width,height,gl.RGBA,gl.FLOAT,floatData);
-      return opts?.raw ? floatData : linearFloatToSRGB8(floatData)
+      if(opts?.raw){
+        runFilter(defaultShader,{})
+        const {width,height}=gl.canvas
+        const floatData = new Float32Array(width*height*4);
+        gl.readPixels(0,0,width,height,gl.RGBA,gl.FLOAT,floatData);
+        return floatData
+      }
+      return readSRGB8Bytes()
   }
 
 
@@ -384,7 +391,7 @@ export function Shader(gl,vertexSrc,fragmentSrc) {
     return {drawRect, uniforms}
 }
 
-export function Texture(gl, width, height) {
+export function Texture(gl, width, height, opts) {
     let _width=width, _height=height
     let txt = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, txt);
@@ -396,7 +403,14 @@ export function Texture(gl, width, height) {
     //RGBA32F (float) rather than 8-bit SRGB8_ALPHA8: these are the working ping-pong
     //buffers the whole filter chain renders through, so they need full precision to
     //avoid quantizing/banding a 16-bit raw decode back down to 8 bits mid-pipeline.
-    if (width && height) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, null);
+    //Exception: opts.srgb8 requests the old 8-bit format — used for the dedicated
+    //output texture (see captureImage/readPixels/crop in minigl()), where hardware
+    //does the linear->sRGB encode for free on write, which is drastically faster than
+    //reading back a full float buffer and sRGB-encoding it pixel-by-pixel in JS.
+    if (width && height) {
+      if (opts?.srgb8) gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, width, height, 0, gl.RGBA, gl.FLOAT, null);
+    }
 
     function use(unit=0){
       if(!txt) return console.error('texture has been destroyed')
