@@ -1,4 +1,4 @@
-import LibRaw from '/node_modules/libraw-wasm/dist/index.js';
+import LibRaw from '/vendor/libraw-wasm/index.js';
 import { minigl, Spline } from '/vendor/mini-gl/minigl.js';
 
 const statusEl = document.getElementById('status');
