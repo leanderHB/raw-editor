@@ -20,6 +20,62 @@ state.sonyLook = false;
 
 const sonyLookCheckbox = document.getElementById('sonyLook');
 
+// --- Settings persistence --------------------------------------------------
+// Saved to localStorage (not an actual HTTP cookie — same idea, but localStorage
+// doesn't get sent to a server on every request and holds more than 4KB, and this
+// app has no server to send cookies to anyway). Every edit becomes the default
+// starting point for the next image you open. 'straighten' is deliberately
+// excluded: it's a per-photo horizon correction, not part of a "look" that should
+// carry over to an unrelated image (matches how Lightroom's "Sync"/"Previous"
+// leaves geometry unchecked by default while carrying tone/color/effects).
+const SETTINGS_STORAGE_KEY = 'raw-editor-settings-v1';
+const PERSISTED_SLIDER_KEYS = SLIDER_KEYS.filter((k) => k !== 'straighten');
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+      sliders: Object.fromEntries(PERSISTED_SLIDER_KEYS.map((k) => [k, state[k]])),
+      sonyLook: state.sonyLook,
+      curvePoints,
+    }));
+  } catch (err) {
+    console.warn('could not save settings', err);
+  }
+}
+
+function loadSavedSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn('could not load saved settings', err);
+    return null;
+  }
+}
+
+// Applies saved settings (or neutral defaults if none exist yet) to state + UI.
+// straighten always starts at 0 regardless — see note above.
+function applySettings(saved) {
+  state.straighten = 0;
+  const straightenInput = document.getElementById('straighten');
+  straightenInput.value = 0;
+  document.getElementById('straightenVal').textContent = '0.00';
+
+  for (const key of PERSISTED_SLIDER_KEYS) {
+    const value = saved?.sliders?.[key] ?? 0;
+    state[key] = value;
+    document.getElementById(key).value = value;
+    document.getElementById(key + 'Val').textContent = value.toFixed(2);
+  }
+
+  state.sonyLook = saved?.sonyLook ?? false;
+  sonyLookCheckbox.checked = state.sonyLook;
+
+  curvePoints = saved?.curvePoints ? saved.curvePoints.map((p) => [...p]) : IDENTITY_CURVE();
+  drawCurve();
+}
+// ---------------------------------------------------------------------------
+
 // darktable (GPL-3) ships a "sony alpha like" base curve — a tone curve
 // approximating Sony Alpha bodies' own in-camera JPEG rendering, matched by
 // maker (any Sony Alpha, not specifically the a6300). Applied first, like a
@@ -316,6 +372,7 @@ function render() {
   applyFilters(wgl);
   wgl.paintCanvas();
   raf = null;
+  saveSettings();
 }
 function scheduleRender() {
   if (raf == null) raf = requestAnimationFrame(render);
@@ -434,13 +491,90 @@ function openFile() {
   fileInput.click();
 }
 
-fileInput.addEventListener('change', async () => {
-  const f = fileInput.files[0];
-  if (!f) return;
-  const data = new Uint8Array(await f.arrayBuffer());
-  await processFile({ name: f.name, data });
+fileInput.addEventListener('change', () => {
+  for (const file of fileInput.files) addImageEntry(file);
   fileInput.value = '';
 });
+
+// --- Sidebar: multiple images, lazy-loaded ---------------------------------
+// Adding a file to the sidebar only extracts its embedded preview JPEG
+// (thumbnailData() — cheap, no demosaic) so the list populates fast regardless
+// of how many files you drop in. The full 16-bit raw decode only happens when
+// you actually click an entry.
+const sidebarEl = document.getElementById('sidebar');
+const toggleSidebarBtn = document.getElementById('toggleSidebarBtn');
+toggleSidebarBtn.addEventListener('click', () => sidebarEl.classList.toggle('hidden'));
+
+let imageEntries = [];
+let activeEntryId = null;
+let nextEntryId = 1;
+
+function renderSidebar() {
+  sidebarEl.innerHTML = '';
+  for (const entry of imageEntries) {
+    const item = document.createElement('div');
+    item.className = 'thumb-item' + (entry.id === activeEntryId ? ' active' : '');
+    item.addEventListener('click', () => selectImage(entry.id));
+
+    if (entry.thumbUrl) {
+      const wrap = document.createElement('div');
+      wrap.className = 'thumb-img';
+      const img = document.createElement('img');
+      img.src = entry.thumbUrl;
+      wrap.appendChild(img);
+      item.appendChild(wrap);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'thumb-placeholder';
+      placeholder.textContent = entry.thumbFailed ? 'no preview' : 'loading…';
+      item.appendChild(placeholder);
+    }
+
+    const name = document.createElement('div');
+    name.className = 'thumb-name';
+    name.textContent = entry.name;
+    item.appendChild(name);
+
+    sidebarEl.appendChild(item);
+  }
+}
+
+async function loadThumbnail(entry) {
+  try {
+    const bytes = new Uint8Array(await entry.file.arrayBuffer());
+    const raw = new LibRaw();
+    await raw.open(bytes);
+    const thumb = await raw.thumbnailData();
+    raw.dispose();
+    if (thumb && thumb.format === 'jpeg') {
+      entry.thumbUrl = URL.createObjectURL(new Blob([thumb.data], { type: 'image/jpeg' }));
+    } else {
+      entry.thumbFailed = true;
+    }
+  } catch (err) {
+    console.warn('thumbnail failed for', entry.name, err);
+    entry.thumbFailed = true;
+  }
+  renderSidebar();
+}
+
+function addImageEntry(file) {
+  const entry = { id: nextEntryId++, file, name: file.name, thumbUrl: null, thumbFailed: false };
+  imageEntries.push(entry);
+  renderSidebar();
+  loadThumbnail(entry);
+  if (activeEntryId === null) selectImage(entry.id);
+}
+
+async function selectImage(id) {
+  const entry = imageEntries.find((e) => e.id === id);
+  if (!entry) return;
+  activeEntryId = id;
+  renderSidebar();
+  const data = new Uint8Array(await entry.file.arrayBuffer());
+  await processFile({ name: entry.name, data });
+}
+// ---------------------------------------------------------------------------
 
 // (Re)builds the interactive preview canvas/mini-gl instance from whatever is
 // currently in fullResRaw. Used both right after decoding a file and after a
@@ -460,8 +594,9 @@ function rebuildPreview(keepEdits) {
   wgl = minigl(canvas, previewImg, 'srgb');
   wgl.loadImage();
   if (!keepEdits) {
-    resetSliders();
-    resetCurve();
+    // new image: start from your last-used settings (saved automatically as you
+    // edit), not a hard reset — see the "Settings persistence" block above.
+    applySettings(loadSavedSettings());
   }
   render();
 }
