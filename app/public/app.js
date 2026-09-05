@@ -639,13 +639,41 @@ function renderSidebar() {
   }
 }
 
+// The embedded preview JPEG that thumbnailData() extracts lives near the start
+// of the file, well before the raw sensor data that makes up most of a raw
+// file's size — reading the first ~1MB is enough on real ARWs, not the full
+// 25+MB. Blob.slice() + arrayBuffer() only touches the requested byte range on
+// disk, so this avoids the full-file read that used to dominate thumbnail time
+// on slow media (SD cards, network drives). If a truncated read doesn't yield
+// a thumbnail (e.g. a raw format/camera that stores it later in the file), we
+// escalate to larger reads and finally the whole file.
+const THUMB_PROBE_SIZES = [1_500_000, 6_000_000, 24_000_000];
+
+async function extractThumbnail(file) {
+  for (const size of THUMB_PROBE_SIZES) {
+    if (size >= file.size) break;
+    try {
+      const chunk = new Uint8Array(await file.slice(0, size).arrayBuffer());
+      const raw = new LibRaw();
+      await raw.open(chunk);
+      const thumb = await raw.thumbnailData();
+      raw.dispose();
+      if (thumb && thumb.format === 'jpeg') return thumb;
+    } catch {
+      // Truncated buffer wasn't enough for this file — try a bigger one.
+    }
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const raw = new LibRaw();
+  await raw.open(bytes);
+  const thumb = await raw.thumbnailData();
+  raw.dispose();
+  return thumb;
+}
+
 async function loadThumbnail(entry) {
   try {
-    const bytes = new Uint8Array(await entry.file.arrayBuffer());
-    const raw = new LibRaw();
-    await raw.open(bytes);
-    const thumb = await raw.thumbnailData();
-    raw.dispose();
+    const thumb = await extractThumbnail(entry.file);
     if (thumb && thumb.format === 'jpeg') {
       entry.thumbUrl = URL.createObjectURL(new Blob([thumb.data], { type: 'image/jpeg' }));
     } else {
