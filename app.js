@@ -13,6 +13,7 @@ const exportBtn = document.getElementById('exportBtn');
 const resetBtn = document.getElementById('resetBtn');
 const rotate90Btn = document.getElementById('rotate90Btn');
 const canvasWrap = document.getElementById('canvasWrap');
+const colorScienceSelect = document.getElementById('colorScienceSelect');
 
 const SLIDER_KEYS = ['straighten', 'exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'saturation', 'temperature', 'tint', 'vibrance', 'clarity', 'dehaze', 'vignette', 'bloom', 'defringe'];
 const state = Object.fromEntries(SLIDER_KEYS.map((k) => [k, 0]));
@@ -336,6 +337,8 @@ const PREVIEW_MAX_DIM = 1800; // interactive edits run against a downscaled prox
 let wgl = null;
 let canvas = null;
 let currentName = 'edited';
+let colorScienceMode = colorScienceSelect.value; // 'original' | 'stageA' | 'stageAB' | 'stageABC'
+let activeCacheKey = null; // fileFingerprint + colorScienceMode — the rawCache's actual key
 let fullResRaw = null; // { data: Uint16Array (RGB triplets), width, height } — kept only for the final export render
 
 // Decoding a raw file is the expensive step (multi-second demosaic, see
@@ -621,6 +624,102 @@ async function decodeArwToRaw(bytes) {
   return { data: img.data, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
 }
 
+// "Ours" color science modes need the exact input space color-profile/colorprofile/
+// raw_decode.py fits against: LibRaw's own sRGB rendering (as-shot WB, its generic camera
+// matrix + gamma) with auto-exposure explicitly disabled. This is NOT decodeArwToRaw's
+// output above — that leaves auto-bright on, which is content-dependent (varies per photo)
+// and would make the fitted LUT's input inconsistent with what it was trained on. An
+// earlier attempt to get true camera-native-linear via outputColor:0 + gamm:[1,1] turned
+// out to behave inconsistently in this vendored wasm build (outputColor is silently
+// ignored whenever noAutoBright is set, always falling back to sRGB) — confirmed by
+// comparing decoded-image statistics against Python's rawpy across several photos, so this
+// simpler sRGB+noAutoBright combination is what both sides are actually trained/matched on.
+async function decodeArwForProfile(bytes) {
+  setStatus('decoding raw…');
+  const t0 = performance.now();
+  const raw = new LibRaw();
+  await raw.open(bytes, {
+    useCameraWb: true,
+    outputColor: 1,
+    noAutoBright: true,
+    outputBps: 16,
+    userQual: 3,
+  });
+  const meta = await raw.metadata(false);
+  const img = await raw.imageData();
+  raw.dispose();
+  const t1 = performance.now();
+  return { data: img.data, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
+}
+
+// Parses a standard .cube 3D LUT file (see color-profile/colorprofile/export.py, which
+// writes these) — grid points enumerate with red fastest-varying, then green, then blue.
+function parseCubeLut(text) {
+  let size = 0;
+  const values = [];
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || line.startsWith('TITLE') || line.startsWith('DOMAIN')) continue;
+    if (line.startsWith('LUT_3D_SIZE')) {
+      size = parseInt(line.split(/\s+/)[1], 10);
+      continue;
+    }
+    const parts = line.split(/\s+/);
+    if (parts.length === 3) values.push(+parts[0], +parts[1], +parts[2]);
+  }
+  return { size, table: new Float32Array(values) };
+}
+
+const LUT_URLS = {
+  stageA: './color-luts/stageA.cube',
+  stageAB: './color-luts/stageAB.cube',
+  stageABC: './color-luts/stageABC.cube',
+};
+const lutCache = new Map();
+async function loadCubeLut(mode) {
+  if (lutCache.has(mode)) return lutCache.get(mode);
+  const res = await fetch(LUT_URLS[mode]);
+  if (!res.ok) throw new Error(`failed to fetch ${LUT_URLS[mode]}: ${res.status}`);
+  const lut = parseCubeLut(await res.text());
+  lutCache.set(mode, lut);
+  return lut;
+}
+
+// Applies a 3D LUT to camera-native linear RGB via trilinear interpolation, in-place over
+// the whole image — done once at decode time (not per render frame), so downstream slider
+// edits, caching, rotation, etc. all keep working unmodified on the result exactly as they
+// already do for decodeArwToRaw's output.
+function applyCubeLut(srcData, lut) {
+  const { size, table } = lut;
+  const maxIdx = size - 1;
+  const out = new Uint16Array(srcData.length);
+
+  for (let o = 0; o < srcData.length; o += 3) {
+    const rf = Math.min(Math.max(srcData[o] / 65535, 0), 1) * maxIdx;
+    const gf = Math.min(Math.max(srcData[o + 1] / 65535, 0), 1) * maxIdx;
+    const bf = Math.min(Math.max(srcData[o + 2] / 65535, 0), 1) * maxIdx;
+
+    const r0 = Math.floor(rf), g0 = Math.floor(gf), b0 = Math.floor(bf);
+    const r1 = Math.min(r0 + 1, maxIdx), g1 = Math.min(g0 + 1, maxIdx), b1 = Math.min(b0 + 1, maxIdx);
+    const fr = rf - r0, fg = gf - g0, fb = bf - b0;
+
+    const i000 = ((b0 * size + g0) * size + r0) * 3, i100 = ((b0 * size + g0) * size + r1) * 3;
+    const i010 = ((b0 * size + g1) * size + r0) * 3, i110 = ((b0 * size + g1) * size + r1) * 3;
+    const i001 = ((b1 * size + g0) * size + r0) * 3, i101 = ((b1 * size + g0) * size + r1) * 3;
+    const i011 = ((b1 * size + g1) * size + r0) * 3, i111 = ((b1 * size + g1) * size + r1) * 3;
+
+    for (let c = 0; c < 3; c++) {
+      const c00 = table[i000 + c] * (1 - fr) + table[i100 + c] * fr;
+      const c10 = table[i010 + c] * (1 - fr) + table[i110 + c] * fr;
+      const c01 = table[i001 + c] * (1 - fr) + table[i101 + c] * fr;
+      const c11 = table[i011 + c] * (1 - fr) + table[i111 + c] * fr;
+      const v = (c00 * (1 - fg) + c10 * fg) * (1 - fb) + (c01 * (1 - fg) + c11 * fg) * fb;
+      out[o + c] = Math.max(0, Math.min(65535, Math.round(v * 65535)));
+    }
+  }
+  return out;
+}
+
 function openFile() {
   fileInput.click();
 }
@@ -750,21 +849,36 @@ function addImageEntry(file) {
   if (activeEntryId === null) selectImage(entry.id);
 }
 
+// Shared by selectImage (new sidebar selection, resets edits) and the color-science
+// mode switch (same image, keeps edits) — both need "read the file only if this exact
+// (file, mode) combination isn't already decoded."
+async function reprocessActiveEntry(keepEdits) {
+  const entry = imageEntries.find((e) => e.id === activeEntryId);
+  if (!entry) return;
+  const fileKey = fileFingerprint(entry.file);
+  const cacheKey = `${fileKey}:${colorScienceMode}`;
+  // Skip the disk read entirely on a cache hit — the whole point is to avoid
+  // touching the file (and redoing the decode) for a (file, mode) pair we already have.
+  if (rawCache.has(cacheKey)) {
+    await processFile({ name: entry.name, fileKey }, keepEdits);
+  } else {
+    const data = new Uint8Array(await entry.file.arrayBuffer());
+    await processFile({ name: entry.name, data, fileKey }, keepEdits);
+  }
+}
+
 async function selectImage(id) {
   const entry = imageEntries.find((e) => e.id === id);
   if (!entry) return;
   activeEntryId = id;
   renderSidebar();
-  const fileKey = fileFingerprint(entry.file);
-  // Skip the disk read entirely on a cache hit — the whole point is to avoid
-  // touching the file (and redoing the decode) for an image we already have.
-  if (rawCache.has(fileKey)) {
-    await processFile({ name: entry.name, fileKey });
-  } else {
-    const data = new Uint8Array(await entry.file.arrayBuffer());
-    await processFile({ name: entry.name, data, fileKey });
-  }
+  await reprocessActiveEntry(false);
 }
+
+colorScienceSelect.addEventListener('change', () => {
+  colorScienceMode = colorScienceSelect.value;
+  if (activeEntryId !== null) reprocessActiveEntry(true); // keep edits — this is a base-layer swap, not a new image
+});
 // ---------------------------------------------------------------------------
 
 // (Re)builds the interactive preview canvas/mini-gl instance from whatever is
@@ -795,28 +909,37 @@ function rebuildPreview(keepEdits) {
   render();
 }
 
-async function processFile(file) {
+async function processFile(file, keepEdits = false) {
   openBtn.disabled = true;
   setStatus(`opening ${file.name}…`);
   currentName = file.name.replace(/\.arw$/i, '') || 'edited';
   activeFileKey = file.fileKey || null;
+  activeCacheKey = activeFileKey ? `${activeFileKey}:${colorScienceMode}` : null;
 
   try {
-    let decoded = rawCacheGet(activeFileKey);
+    let decoded = rawCacheGet(activeCacheKey);
     const fromCache = !!decoded;
     if (!decoded) {
-      decoded = await decodeArwToRaw(file.data);
-      if (activeFileKey) rawCacheSet(activeFileKey, { ...decoded, byteSize: decoded.data.byteLength });
+      if (colorScienceMode === 'original') {
+        decoded = await decodeArwToRaw(file.data);
+      } else {
+        const base = await decodeArwForProfile(file.data);
+        setStatus('applying color profile…');
+        const lut = await loadCubeLut(colorScienceMode);
+        const corrected = applyCubeLut(base.data, lut);
+        decoded = { data: corrected, width: base.width, height: base.height, meta: base.meta, decodeMs: base.decodeMs };
+      }
+      if (activeCacheKey) rawCacheSet(activeCacheKey, { ...decoded, byteSize: decoded.data.byteLength });
     }
     fullResRaw = { data: decoded.data, width: decoded.width, height: decoded.height };
 
-    rebuildPreview(false);
+    rebuildPreview(keepEdits);
 
     exportBtn.disabled = false;
     resetBtn.disabled = false;
     rotate90Btn.disabled = false;
     const decodeNote = fromCache ? 'from cache' : `decoded in ${decoded.decodeMs.toFixed(0)}ms`;
-    setStatus(`${decoded.meta.camera_model} · ${decoded.width}x${decoded.height} (editing at ${canvas.width}x${canvas.height}, 16-bit) · ${decodeNote}`);
+    setStatus(`${decoded.meta.camera_model} · ${decoded.width}x${decoded.height} (editing at ${canvas.width}x${canvas.height}, 16-bit) · ${colorScienceMode} · ${decodeNote}`);
   } catch (err) {
     console.error(err);
     setStatus('failed to decode: ' + err.message);
@@ -830,9 +953,9 @@ function rotate90() {
   fullResRaw = rotate90CW(fullResRaw.data, fullResRaw.width, fullResRaw.height);
   // Keep the cached entry in sync so switching away and back this session
   // still reflects the rotation instead of reverting to the original orientation.
-  if (activeFileKey && rawCache.has(activeFileKey)) {
-    const cached = rawCache.get(activeFileKey);
-    rawCacheSet(activeFileKey, { ...cached, data: fullResRaw.data, width: fullResRaw.width, height: fullResRaw.height, byteSize: fullResRaw.data.byteLength });
+  if (activeCacheKey && rawCache.has(activeCacheKey)) {
+    const cached = rawCache.get(activeCacheKey);
+    rawCacheSet(activeCacheKey, { ...cached, data: fullResRaw.data, width: fullResRaw.width, height: fullResRaw.height, byteSize: fullResRaw.data.byteLength });
   }
   rebuildPreview(true); // keep current edits — rotation is a geometry change, not an edit reset
   setStatus(`rotated to ${fullResRaw.width}x${fullResRaw.height}`);
