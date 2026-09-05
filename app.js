@@ -686,11 +686,33 @@ async function loadThumbnail(entry) {
   renderSidebar();
 }
 
+// Dropping in a whole folder can mean dozens of files at once. Loading them
+// all in parallel would spin up one Web Worker (and one wasm instance) per
+// file simultaneously, and on slow media (SD cards, network drives) that many
+// concurrent random reads thrash badly instead of streaming. Cap how many
+// thumbnails load at once so the rest queue up and the browser/disk stay
+// responsive.
+const THUMB_CONCURRENCY = 3;
+const thumbQueue = [];
+let thumbActive = 0;
+
+function pumpThumbQueue() {
+  while (thumbActive < THUMB_CONCURRENCY && thumbQueue.length > 0) {
+    const entry = thumbQueue.shift();
+    thumbActive++;
+    loadThumbnail(entry).finally(() => {
+      thumbActive--;
+      pumpThumbQueue();
+    });
+  }
+}
+
 function addImageEntry(file) {
   const entry = { id: nextEntryId++, file, name: file.name, thumbUrl: null, thumbFailed: false };
   imageEntries.push(entry);
   renderSidebar();
-  loadThumbnail(entry);
+  thumbQueue.push(entry);
+  pumpThumbQueue();
   if (activeEntryId === null) selectImage(entry.id);
 }
 
