@@ -20,24 +20,58 @@ state.sonyLook = false;
 
 const sonyLookCheckbox = document.getElementById('sonyLook');
 
-// --- Settings persistence --------------------------------------------------
-// Saved to localStorage (not an actual HTTP cookie — same idea, but localStorage
-// doesn't get sent to a server on every request and holds more than 4KB, and this
-// app has no server to send cookies to anyway). Every edit becomes the default
-// starting point for the next image you open. 'straighten' is deliberately
-// excluded: it's a per-photo horizon correction, not part of a "look" that should
-// carry over to an unrelated image (matches how Lightroom's "Sync"/"Previous"
-// leaves geometry unchecked by default while carrying tone/color/effects).
+// --- Settings persistence & named presets ----------------------------------
+// Two related but separate mechanisms, both in localStorage (not an actual HTTP
+// cookie — same idea, but doesn't round-trip to a server on every request and
+// holds far more than 4KB; there's no server here anyway):
+//
+// 1. Auto-saved "last used" settings: every edit silently becomes the default
+//    starting point for the next image you open. No name, one slot, always on.
+// 2. Named presets: an explicit list you save/apply/delete on demand.
+//
+// Both exclude 'straighten': it's a per-photo horizon correction, not part of
+// a "look" that should carry over to an unrelated image (mirrors how
+// Lightroom's Sync/Previous-settings dialog leaves geometry unchecked by
+// default while carrying tone/color/effects).
 const SETTINGS_STORAGE_KEY = 'raw-editor-settings-v1';
+const PRESETS_STORAGE_KEY = 'raw-editor-presets-v1';
 const PERSISTED_SLIDER_KEYS = SLIDER_KEYS.filter((k) => k !== 'straighten');
+
+// The serializable "look": every slider except straighten, Sony Look, and the
+// tone curve. Shared by both the auto-save slot and named presets.
+function serializeLook() {
+  return {
+    sliders: Object.fromEntries(PERSISTED_SLIDER_KEYS.map((k) => [k, state[k]])),
+    sonyLook: state.sonyLook,
+    curvePoints,
+  };
+}
+
+// Applies a serialized look to state + UI. Deliberately never touches
+// straighten — callers that need straighten reset (opening a brand new image)
+// do that separately with resetStraighten().
+function applyLook(look) {
+  for (const key of PERSISTED_SLIDER_KEYS) {
+    const value = look?.sliders?.[key] ?? 0;
+    state[key] = value;
+    document.getElementById(key).value = value;
+    document.getElementById(key + 'Val').textContent = value.toFixed(2);
+  }
+  state.sonyLook = look?.sonyLook ?? false;
+  sonyLookCheckbox.checked = state.sonyLook;
+  curvePoints = look?.curvePoints ? look.curvePoints.map((p) => [...p]) : IDENTITY_CURVE();
+  drawCurve();
+}
+
+function resetStraighten() {
+  state.straighten = 0;
+  document.getElementById('straighten').value = 0;
+  document.getElementById('straightenVal').textContent = '0.00';
+}
 
 function saveSettings() {
   try {
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
-      sliders: Object.fromEntries(PERSISTED_SLIDER_KEYS.map((k) => [k, state[k]])),
-      sonyLook: state.sonyLook,
-      curvePoints,
-    }));
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(serializeLook()));
   } catch (err) {
     console.warn('could not save settings', err);
   }
@@ -53,26 +87,114 @@ function loadSavedSettings() {
   }
 }
 
-// Applies saved settings (or neutral defaults if none exist yet) to state + UI.
-// straighten always starts at 0 regardless — see note above.
-function applySettings(saved) {
-  state.straighten = 0;
-  const straightenInput = document.getElementById('straighten');
-  straightenInput.value = 0;
-  document.getElementById('straightenVal').textContent = '0.00';
-
-  for (const key of PERSISTED_SLIDER_KEYS) {
-    const value = saved?.sliders?.[key] ?? 0;
-    state[key] = value;
-    document.getElementById(key).value = value;
-    document.getElementById(key + 'Val').textContent = value.toFixed(2);
+function loadPresets() {
+  try {
+    const raw = localStorage.getItem(PRESETS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (err) {
+    console.warn('could not load presets', err);
+    return [];
   }
+}
 
-  state.sonyLook = saved?.sonyLook ?? false;
-  sonyLookCheckbox.checked = state.sonyLook;
+function savePresetsList(list) {
+  try {
+    localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn('could not save presets', err);
+  }
+}
 
-  curvePoints = saved?.curvePoints ? saved.curvePoints.map((p) => [...p]) : IDENTITY_CURVE();
-  drawCurve();
+const presetSelect = document.getElementById('presetSelect');
+const savePresetBtn = document.getElementById('savePresetBtn');
+const deletePresetBtn = document.getElementById('deletePresetBtn');
+
+function renderPresetOptions() {
+  const presets = loadPresets();
+  const current = presetSelect.value;
+  presetSelect.innerHTML = '<option value="">— choose a preset —</option>';
+  for (const preset of presets) {
+    const opt = document.createElement('option');
+    opt.value = preset.name;
+    opt.textContent = preset.name;
+    presetSelect.appendChild(opt);
+  }
+  presetSelect.value = presets.some((p) => p.name === current) ? current : '';
+  deletePresetBtn.disabled = !presetSelect.value;
+}
+
+presetSelect.addEventListener('change', () => {
+  deletePresetBtn.disabled = !presetSelect.value;
+  if (!presetSelect.value) return;
+  const preset = loadPresets().find((p) => p.name === presetSelect.value);
+  if (!preset) return;
+  applyLook(preset); // never touches straighten — presets are a color/tone look, not geometry
+  render();
+});
+
+savePresetBtn.addEventListener('click', () => {
+  const name = window.prompt('Save current settings as preset named:');
+  if (!name) return;
+  const presets = loadPresets();
+  const existingIndex = presets.findIndex((p) => p.name === name);
+  if (existingIndex !== -1 && !window.confirm(`A preset named "${name}" already exists. Overwrite it?`)) return;
+  const preset = { name, ...serializeLook() };
+  if (existingIndex !== -1) presets[existingIndex] = preset;
+  else presets.push(preset);
+  savePresetsList(presets);
+  renderPresetOptions();
+  presetSelect.value = name;
+  deletePresetBtn.disabled = false;
+});
+
+deletePresetBtn.addEventListener('click', () => {
+  if (!presetSelect.value) return;
+  if (!window.confirm(`Delete preset "${presetSelect.value}"?`)) return;
+  savePresetsList(loadPresets().filter((p) => p.name !== presetSelect.value));
+  renderPresetOptions();
+});
+
+renderPresetOptions();
+// ---------------------------------------------------------------------------
+
+// --- Per-image settings -----------------------------------------------------
+// On top of the single global "last used" default above: each specific photo
+// remembers its own edit, keyed by a fingerprint (name+size+lastModified —
+// the closest thing to a stable ID the browser File API exposes, no real path
+// available). This survives both switching between sidebar images in one
+// session (each keeps its own look) and reopening the same file in a future
+// session (localStorage, not in-memory) — "reload the image, get the same
+// edit again". Falls back to the global default for a genuinely new file.
+const PER_IMAGE_STORAGE_KEY = 'raw-editor-per-image-v1';
+let activeFileKey = null;
+
+function fileFingerprint(file) {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function loadPerImageStore() {
+  try {
+    return JSON.parse(localStorage.getItem(PER_IMAGE_STORAGE_KEY) || '{}');
+  } catch (err) {
+    console.warn('could not load per-image settings', err);
+    return {};
+  }
+}
+
+function savePerImageLook(fileKey) {
+  if (!fileKey) return;
+  try {
+    const store = loadPerImageStore();
+    store[fileKey] = serializeLook();
+    localStorage.setItem(PER_IMAGE_STORAGE_KEY, JSON.stringify(store));
+  } catch (err) {
+    console.warn('could not save per-image settings', err);
+  }
+}
+
+function loadPerImageLook(fileKey) {
+  if (!fileKey) return null;
+  return loadPerImageStore()[fileKey] || null;
 }
 // ---------------------------------------------------------------------------
 
@@ -373,6 +495,7 @@ function render() {
   wgl.paintCanvas();
   raf = null;
   saveSettings();
+  savePerImageLook(activeFileKey);
 }
 function scheduleRender() {
   if (raf == null) raf = requestAnimationFrame(render);
@@ -572,7 +695,7 @@ async function selectImage(id) {
   activeEntryId = id;
   renderSidebar();
   const data = new Uint8Array(await entry.file.arrayBuffer());
-  await processFile({ name: entry.name, data });
+  await processFile({ name: entry.name, data, fileKey: fileFingerprint(entry.file) });
 }
 // ---------------------------------------------------------------------------
 
@@ -594,9 +717,12 @@ function rebuildPreview(keepEdits) {
   wgl = minigl(canvas, previewImg, 'srgb');
   wgl.loadImage();
   if (!keepEdits) {
-    // new image: start from your last-used settings (saved automatically as you
-    // edit), not a hard reset — see the "Settings persistence" block above.
-    applySettings(loadSavedSettings());
+    // new image: this exact file's own remembered edit if we've seen it before
+    // (by fingerprint — switching back to an already-edited sidebar image, or
+    // reopening the same file in a future session), else the global last-used
+    // default. Straighten always resets for a genuinely new image, regardless.
+    resetStraighten();
+    applyLook(loadPerImageLook(activeFileKey) || loadSavedSettings());
   }
   render();
 }
@@ -605,6 +731,7 @@ async function processFile(file) {
   openBtn.disabled = true;
   setStatus(`opening ${file.name}…`);
   currentName = file.name.replace(/\.arw$/i, '') || 'edited';
+  activeFileKey = file.fileKey || null;
 
   try {
     const { data, meta, width, height, decodeMs } = await decodeArwToRaw(file.data);
