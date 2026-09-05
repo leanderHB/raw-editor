@@ -76,6 +76,16 @@
   <div id="sidebar"></div>
   <div id="canvasWrap"><span id="placeholder">Open one or more .ARW files to begin</span></div>
   <div id="panel">
+    <div class="section-title">Color Science</div>
+    <div id="colorScienceRow">
+      <select id="colorScienceSelect">
+        <option value="original">Original (LibRaw default)</option>
+        <option value="stageA">Ours: Stage A (matrix + curve)</option>
+        <option value="stageAB">Ours: Stage A+B (+ polynomial)</option>
+        <option value="stageABC" selected>Ours: Stage A+B+C (full, fitted from our own RAW+JPEG pairs)</option>
+      </select>
+    </div>
+
     <div class="section-title">Presets</div>
     <div id="presetRow">
       <select id="presetSelect"><option value="">— choose a preset —</option></select>

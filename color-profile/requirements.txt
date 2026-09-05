@@ -1,0 +1,6 @@
+numpy
+scipy
+rawpy
+Pillow
+scikit-learn
+colour-science
