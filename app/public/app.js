@@ -338,6 +338,40 @@ let canvas = null;
 let currentName = 'edited';
 let fullResRaw = null; // { data: Uint16Array (RGB triplets), width, height } — kept only for the final export render
 
+// Decoding a raw file is the expensive step (multi-second demosaic, see
+// decodeArwToRaw below), so keep the last few decoded results around and
+// skip re-decoding when flipping back to a sidebar image you already opened
+// this session. Bounded by count (10) AND total bytes (500MB) — whichever
+// limit is hit first evicts the least-recently-used entry. A Map's iteration
+// order is insertion order, so re-inserting an entry on access is enough to
+// track LRU without a separate structure.
+const RAW_CACHE_MAX_ENTRIES = 10;
+const RAW_CACHE_MAX_BYTES = 500 * 1024 * 1024;
+const rawCache = new Map(); // fileKey -> { data, width, height, meta, decodeMs, byteSize }
+let rawCacheBytes = 0;
+
+function rawCacheGet(key) {
+  if (!key || !rawCache.has(key)) return null;
+  const entry = rawCache.get(key);
+  rawCache.delete(key);
+  rawCache.set(key, entry); // move to the most-recently-used end
+  return entry;
+}
+
+function rawCacheSet(key, entry) {
+  if (!key) return;
+  if (rawCache.has(key)) rawCacheBytes -= rawCache.get(key).byteSize;
+  rawCache.delete(key);
+  rawCache.set(key, entry);
+  rawCacheBytes += entry.byteSize;
+  while (rawCache.size > RAW_CACHE_MAX_ENTRIES || rawCacheBytes > RAW_CACHE_MAX_BYTES) {
+    const oldestKey = rawCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    rawCacheBytes -= rawCache.get(oldestKey).byteSize;
+    rawCache.delete(oldestKey);
+  }
+}
+
 function resetSliders() {
   for (const key of SLIDER_KEYS) {
     state[key] = 0;
@@ -721,8 +755,15 @@ async function selectImage(id) {
   if (!entry) return;
   activeEntryId = id;
   renderSidebar();
-  const data = new Uint8Array(await entry.file.arrayBuffer());
-  await processFile({ name: entry.name, data, fileKey: fileFingerprint(entry.file) });
+  const fileKey = fileFingerprint(entry.file);
+  // Skip the disk read entirely on a cache hit — the whole point is to avoid
+  // touching the file (and redoing the decode) for an image we already have.
+  if (rawCache.has(fileKey)) {
+    await processFile({ name: entry.name, fileKey });
+  } else {
+    const data = new Uint8Array(await entry.file.arrayBuffer());
+    await processFile({ name: entry.name, data, fileKey });
+  }
 }
 // ---------------------------------------------------------------------------
 
@@ -761,15 +802,21 @@ async function processFile(file) {
   activeFileKey = file.fileKey || null;
 
   try {
-    const { data, meta, width, height, decodeMs } = await decodeArwToRaw(file.data);
-    fullResRaw = { data, width, height };
+    let decoded = rawCacheGet(activeFileKey);
+    const fromCache = !!decoded;
+    if (!decoded) {
+      decoded = await decodeArwToRaw(file.data);
+      if (activeFileKey) rawCacheSet(activeFileKey, { ...decoded, byteSize: decoded.data.byteLength });
+    }
+    fullResRaw = { data: decoded.data, width: decoded.width, height: decoded.height };
 
     rebuildPreview(false);
 
     exportBtn.disabled = false;
     resetBtn.disabled = false;
     rotate90Btn.disabled = false;
-    setStatus(`${meta.camera_model} · ${width}x${height} (editing at ${canvas.width}x${canvas.height}, 16-bit) · decoded in ${decodeMs.toFixed(0)}ms`);
+    const decodeNote = fromCache ? 'from cache' : `decoded in ${decoded.decodeMs.toFixed(0)}ms`;
+    setStatus(`${decoded.meta.camera_model} · ${decoded.width}x${decoded.height} (editing at ${canvas.width}x${canvas.height}, 16-bit) · ${decodeNote}`);
   } catch (err) {
     console.error(err);
     setStatus('failed to decode: ' + err.message);
@@ -781,6 +828,12 @@ async function processFile(file) {
 function rotate90() {
   if (!fullResRaw) return;
   fullResRaw = rotate90CW(fullResRaw.data, fullResRaw.width, fullResRaw.height);
+  // Keep the cached entry in sync so switching away and back this session
+  // still reflects the rotation instead of reverting to the original orientation.
+  if (activeFileKey && rawCache.has(activeFileKey)) {
+    const cached = rawCache.get(activeFileKey);
+    rawCacheSet(activeFileKey, { ...cached, data: fullResRaw.data, width: fullResRaw.width, height: fullResRaw.height, byteSize: fullResRaw.data.byteLength });
+  }
   rebuildPreview(true); // keep current edits — rotation is a geometry change, not an edit reset
   setStatus(`rotated to ${fullResRaw.width}x${fullResRaw.height}`);
 }
