@@ -16,23 +16,181 @@ const canvasWrap = document.getElementById('canvasWrap');
 
 const SLIDER_KEYS = ['straighten', 'exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'saturation', 'temperature', 'tint', 'vibrance', 'clarity', 'dehaze', 'vignette', 'bloom', 'defringe'];
 const state = Object.fromEntries(SLIDER_KEYS.map((k) => [k, 0]));
-state.sonyLook = false;
 
-const sonyLookCheckbox = document.getElementById('sonyLook');
+// --- Settings persistence & named presets ----------------------------------
+// Two related but separate mechanisms, both in localStorage (not an actual HTTP
+// cookie — same idea, but doesn't round-trip to a server on every request and
+// holds far more than 4KB; there's no server here anyway):
+//
+// 1. Auto-saved "last used" settings: every edit silently becomes the default
+//    starting point for the next image you open. No name, one slot, always on.
+// 2. Named presets: an explicit list you save/apply/delete on demand.
+//
+// Both exclude 'straighten': it's a per-photo horizon correction, not part of
+// a "look" that should carry over to an unrelated image (mirrors how
+// Lightroom's Sync/Previous-settings dialog leaves geometry unchecked by
+// default while carrying tone/color/effects).
+const SETTINGS_STORAGE_KEY = 'raw-editor-settings-v1';
+const PRESETS_STORAGE_KEY = 'raw-editor-presets-v1';
+const PERSISTED_SLIDER_KEYS = SLIDER_KEYS.filter((k) => k !== 'straighten');
 
-// darktable (GPL-3) ships a "sony alpha like" base curve — a tone curve
-// approximating Sony Alpha bodies' own in-camera JPEG rendering, matched by
-// maker (any Sony Alpha, not specifically the a6300). Applied first, like a
-// camera profile, before the user's own adjustments sit on top of it.
-// Source: darktable src/iop/basecurve.c, basecurve_presets[], "sony alpha like".
-const SONY_ALPHA_LIKE_CURVE = [
-  [0, 0],
-  [0.031949, 0.036532],
-  [0.105431, 0.228226],
-  [0.434505, 0.759678],
-  [0.855738, 0.983468],
-  [1, 1],
-];
+// The serializable "look": every slider except straighten, Sony Look, and the
+// tone curve. Shared by both the auto-save slot and named presets.
+function serializeLook() {
+  return {
+    sliders: Object.fromEntries(PERSISTED_SLIDER_KEYS.map((k) => [k, state[k]])),
+    curvePoints,
+  };
+}
+
+// Applies a serialized look to state + UI. Deliberately never touches
+// straighten — callers that need straighten reset (opening a brand new image)
+// do that separately with resetStraighten().
+function applyLook(look) {
+  for (const key of PERSISTED_SLIDER_KEYS) {
+    const value = look?.sliders?.[key] ?? 0;
+    state[key] = value;
+    document.getElementById(key).value = value;
+    document.getElementById(key + 'Val').textContent = value.toFixed(2);
+  }
+  curvePoints = look?.curvePoints ? look.curvePoints.map((p) => [...p]) : IDENTITY_CURVE();
+  drawCurve();
+}
+
+function resetStraighten() {
+  state.straighten = 0;
+  document.getElementById('straighten').value = 0;
+  document.getElementById('straightenVal').textContent = '0.00';
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(serializeLook()));
+  } catch (err) {
+    console.warn('could not save settings', err);
+  }
+}
+
+function loadSavedSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn('could not load saved settings', err);
+    return null;
+  }
+}
+
+function loadPresets() {
+  try {
+    const raw = localStorage.getItem(PRESETS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (err) {
+    console.warn('could not load presets', err);
+    return [];
+  }
+}
+
+function savePresetsList(list) {
+  try {
+    localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn('could not save presets', err);
+  }
+}
+
+const presetSelect = document.getElementById('presetSelect');
+const savePresetBtn = document.getElementById('savePresetBtn');
+const deletePresetBtn = document.getElementById('deletePresetBtn');
+
+function renderPresetOptions() {
+  const presets = loadPresets();
+  const current = presetSelect.value;
+  presetSelect.innerHTML = '<option value="">— choose a preset —</option>';
+  for (const preset of presets) {
+    const opt = document.createElement('option');
+    opt.value = preset.name;
+    opt.textContent = preset.name;
+    presetSelect.appendChild(opt);
+  }
+  presetSelect.value = presets.some((p) => p.name === current) ? current : '';
+  deletePresetBtn.disabled = !presetSelect.value;
+}
+
+presetSelect.addEventListener('change', () => {
+  deletePresetBtn.disabled = !presetSelect.value;
+  if (!presetSelect.value) return;
+  const preset = loadPresets().find((p) => p.name === presetSelect.value);
+  if (!preset) return;
+  applyLook(preset); // never touches straighten — presets are a color/tone look, not geometry
+  render();
+});
+
+savePresetBtn.addEventListener('click', () => {
+  const name = window.prompt('Save current settings as preset named:');
+  if (!name) return;
+  const presets = loadPresets();
+  const existingIndex = presets.findIndex((p) => p.name === name);
+  if (existingIndex !== -1 && !window.confirm(`A preset named "${name}" already exists. Overwrite it?`)) return;
+  const preset = { name, ...serializeLook() };
+  if (existingIndex !== -1) presets[existingIndex] = preset;
+  else presets.push(preset);
+  savePresetsList(presets);
+  renderPresetOptions();
+  presetSelect.value = name;
+  deletePresetBtn.disabled = false;
+});
+
+deletePresetBtn.addEventListener('click', () => {
+  if (!presetSelect.value) return;
+  if (!window.confirm(`Delete preset "${presetSelect.value}"?`)) return;
+  savePresetsList(loadPresets().filter((p) => p.name !== presetSelect.value));
+  renderPresetOptions();
+});
+
+renderPresetOptions();
+// ---------------------------------------------------------------------------
+
+// --- Per-image settings -----------------------------------------------------
+// On top of the single global "last used" default above: each specific photo
+// remembers its own edit, keyed by a fingerprint (name+size+lastModified —
+// the closest thing to a stable ID the browser File API exposes, no real path
+// available). This survives both switching between sidebar images in one
+// session (each keeps its own look) and reopening the same file in a future
+// session (localStorage, not in-memory) — "reload the image, get the same
+// edit again". Falls back to the global default for a genuinely new file.
+const PER_IMAGE_STORAGE_KEY = 'raw-editor-per-image-v1';
+let activeFileKey = null;
+
+function fileFingerprint(file) {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function loadPerImageStore() {
+  try {
+    return JSON.parse(localStorage.getItem(PER_IMAGE_STORAGE_KEY) || '{}');
+  } catch (err) {
+    console.warn('could not load per-image settings', err);
+    return {};
+  }
+}
+
+function savePerImageLook(fileKey) {
+  if (!fileKey) return;
+  try {
+    const store = loadPerImageStore();
+    store[fileKey] = serializeLook();
+    localStorage.setItem(PER_IMAGE_STORAGE_KEY, JSON.stringify(store));
+  } catch (err) {
+    console.warn('could not save per-image settings', err);
+  }
+}
+
+function loadPerImageLook(fileKey) {
+  if (!fileKey) return null;
+  return loadPerImageStore()[fileKey] || null;
+}
+// ---------------------------------------------------------------------------
 
 // --- Tone curve editor ---------------------------------------------------
 // A single value/luminance curve (no separate R/G/B channels) — click empty
@@ -284,7 +442,7 @@ function applyFilters(wglInstance) {
   //    gamma-encoded) — first attempt at Whites/Blacks/Dehaze in linear light
   //    crushed most of the frame to black. So: bracket the whole group.
   const curveActive = !isCurveIdentity();
-  if (state.whites || state.blacks || state.dehaze || state.sonyLook || state.contrast || curveActive) {
+  if (state.whites || state.blacks || state.dehaze || state.contrast || curveActive) {
     wglInstance.filterToGamma();
     // Whites/Blacks: distinct from Highlights/Shadows above — those do a regional
     // tone-compression recovery, these set the actual clip points (a plain levels remap).
@@ -292,9 +450,6 @@ function applyFilters(wglInstance) {
     // Dehaze: a real, working simplified haze-removal model (see filterDehaze.js for
     // the honest caveat vs. Adobe's per-pixel version).
     wglInstance.filterDehaze(state.dehaze);
-    if (state.sonyLook) {
-      wglInstance.filterCurves([SONY_ALPHA_LIKE_CURVE, null, null, null]);
-    }
     if (state.contrast) {
       wglInstance.filterCurves([contrastCurvePoints(state.contrast), null, null, null]);
     }
@@ -316,6 +471,8 @@ function render() {
   applyFilters(wgl);
   wgl.paintCanvas();
   raf = null;
+  saveSettings();
+  savePerImageLook(activeFileKey);
 }
 function scheduleRender() {
   if (raf == null) raf = requestAnimationFrame(render);
@@ -434,13 +591,90 @@ function openFile() {
   fileInput.click();
 }
 
-fileInput.addEventListener('change', async () => {
-  const f = fileInput.files[0];
-  if (!f) return;
-  const data = new Uint8Array(await f.arrayBuffer());
-  await processFile({ name: f.name, data });
+fileInput.addEventListener('change', () => {
+  for (const file of fileInput.files) addImageEntry(file);
   fileInput.value = '';
 });
+
+// --- Sidebar: multiple images, lazy-loaded ---------------------------------
+// Adding a file to the sidebar only extracts its embedded preview JPEG
+// (thumbnailData() — cheap, no demosaic) so the list populates fast regardless
+// of how many files you drop in. The full 16-bit raw decode only happens when
+// you actually click an entry.
+const sidebarEl = document.getElementById('sidebar');
+const toggleSidebarBtn = document.getElementById('toggleSidebarBtn');
+toggleSidebarBtn.addEventListener('click', () => sidebarEl.classList.toggle('hidden'));
+
+let imageEntries = [];
+let activeEntryId = null;
+let nextEntryId = 1;
+
+function renderSidebar() {
+  sidebarEl.innerHTML = '';
+  for (const entry of imageEntries) {
+    const item = document.createElement('div');
+    item.className = 'thumb-item' + (entry.id === activeEntryId ? ' active' : '');
+    item.addEventListener('click', () => selectImage(entry.id));
+
+    if (entry.thumbUrl) {
+      const wrap = document.createElement('div');
+      wrap.className = 'thumb-img';
+      const img = document.createElement('img');
+      img.src = entry.thumbUrl;
+      wrap.appendChild(img);
+      item.appendChild(wrap);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'thumb-placeholder';
+      placeholder.textContent = entry.thumbFailed ? 'no preview' : 'loading…';
+      item.appendChild(placeholder);
+    }
+
+    const name = document.createElement('div');
+    name.className = 'thumb-name';
+    name.textContent = entry.name;
+    item.appendChild(name);
+
+    sidebarEl.appendChild(item);
+  }
+}
+
+async function loadThumbnail(entry) {
+  try {
+    const bytes = new Uint8Array(await entry.file.arrayBuffer());
+    const raw = new LibRaw();
+    await raw.open(bytes);
+    const thumb = await raw.thumbnailData();
+    raw.dispose();
+    if (thumb && thumb.format === 'jpeg') {
+      entry.thumbUrl = URL.createObjectURL(new Blob([thumb.data], { type: 'image/jpeg' }));
+    } else {
+      entry.thumbFailed = true;
+    }
+  } catch (err) {
+    console.warn('thumbnail failed for', entry.name, err);
+    entry.thumbFailed = true;
+  }
+  renderSidebar();
+}
+
+function addImageEntry(file) {
+  const entry = { id: nextEntryId++, file, name: file.name, thumbUrl: null, thumbFailed: false };
+  imageEntries.push(entry);
+  renderSidebar();
+  loadThumbnail(entry);
+  if (activeEntryId === null) selectImage(entry.id);
+}
+
+async function selectImage(id) {
+  const entry = imageEntries.find((e) => e.id === id);
+  if (!entry) return;
+  activeEntryId = id;
+  renderSidebar();
+  const data = new Uint8Array(await entry.file.arrayBuffer());
+  await processFile({ name: entry.name, data, fileKey: fileFingerprint(entry.file) });
+}
+// ---------------------------------------------------------------------------
 
 // (Re)builds the interactive preview canvas/mini-gl instance from whatever is
 // currently in fullResRaw. Used both right after decoding a file and after a
@@ -460,8 +694,12 @@ function rebuildPreview(keepEdits) {
   wgl = minigl(canvas, previewImg, 'srgb');
   wgl.loadImage();
   if (!keepEdits) {
-    resetSliders();
-    resetCurve();
+    // new image: this exact file's own remembered edit if we've seen it before
+    // (by fingerprint — switching back to an already-edited sidebar image, or
+    // reopening the same file in a future session), else the global last-used
+    // default. Straighten always resets for a genuinely new image, regardless.
+    resetStraighten();
+    applyLook(loadPerImageLook(activeFileKey) || loadSavedSettings());
   }
   render();
 }
@@ -470,6 +708,7 @@ async function processFile(file) {
   openBtn.disabled = true;
   setStatus(`opening ${file.name}…`);
   currentName = file.name.replace(/\.arw$/i, '') || 'edited';
+  activeFileKey = file.fileKey || null;
 
   try {
     const { data, meta, width, height, decodeMs } = await decodeArwToRaw(file.data);
@@ -533,10 +772,6 @@ openBtn.addEventListener('click', openFile);
 exportBtn.addEventListener('click', exportFile);
 resetBtn.addEventListener('click', () => { resetSliders(); resetCurve(); render(); });
 rotate90Btn.addEventListener('click', rotate90);
-sonyLookCheckbox.addEventListener('change', () => {
-  state.sonyLook = sonyLookCheckbox.checked;
-  scheduleRender();
-});
 
 window.__testOpenBytes = async (bytes) => {
   await processFile({ name: 'test.arw', data: bytes });
