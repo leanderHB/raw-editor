@@ -16,9 +16,6 @@ const canvasWrap = document.getElementById('canvasWrap');
 
 const SLIDER_KEYS = ['straighten', 'exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'saturation', 'temperature', 'tint', 'vibrance', 'clarity', 'dehaze', 'vignette', 'bloom', 'defringe'];
 const state = Object.fromEntries(SLIDER_KEYS.map((k) => [k, 0]));
-state.sonyLook = false;
-
-const sonyLookCheckbox = document.getElementById('sonyLook');
 
 // --- Settings persistence & named presets ----------------------------------
 // Two related but separate mechanisms, both in localStorage (not an actual HTTP
@@ -42,7 +39,6 @@ const PERSISTED_SLIDER_KEYS = SLIDER_KEYS.filter((k) => k !== 'straighten');
 function serializeLook() {
   return {
     sliders: Object.fromEntries(PERSISTED_SLIDER_KEYS.map((k) => [k, state[k]])),
-    sonyLook: state.sonyLook,
     curvePoints,
   };
 }
@@ -57,8 +53,6 @@ function applyLook(look) {
     document.getElementById(key).value = value;
     document.getElementById(key + 'Val').textContent = value.toFixed(2);
   }
-  state.sonyLook = look?.sonyLook ?? false;
-  sonyLookCheckbox.checked = state.sonyLook;
   curvePoints = look?.curvePoints ? look.curvePoints.map((p) => [...p]) : IDENTITY_CURVE();
   drawCurve();
 }
@@ -197,20 +191,6 @@ function loadPerImageLook(fileKey) {
   return loadPerImageStore()[fileKey] || null;
 }
 // ---------------------------------------------------------------------------
-
-// darktable (GPL-3) ships a "sony alpha like" base curve — a tone curve
-// approximating Sony Alpha bodies' own in-camera JPEG rendering, matched by
-// maker (any Sony Alpha, not specifically the a6300). Applied first, like a
-// camera profile, before the user's own adjustments sit on top of it.
-// Source: darktable src/iop/basecurve.c, basecurve_presets[], "sony alpha like".
-const SONY_ALPHA_LIKE_CURVE = [
-  [0, 0],
-  [0.031949, 0.036532],
-  [0.105431, 0.228226],
-  [0.434505, 0.759678],
-  [0.855738, 0.983468],
-  [1, 1],
-];
 
 // --- Tone curve editor ---------------------------------------------------
 // A single value/luminance curve (no separate R/G/B channels) — click empty
@@ -462,7 +442,7 @@ function applyFilters(wglInstance) {
   //    gamma-encoded) — first attempt at Whites/Blacks/Dehaze in linear light
   //    crushed most of the frame to black. So: bracket the whole group.
   const curveActive = !isCurveIdentity();
-  if (state.whites || state.blacks || state.dehaze || state.sonyLook || state.contrast || curveActive) {
+  if (state.whites || state.blacks || state.dehaze || state.contrast || curveActive) {
     wglInstance.filterToGamma();
     // Whites/Blacks: distinct from Highlights/Shadows above — those do a regional
     // tone-compression recovery, these set the actual clip points (a plain levels remap).
@@ -470,9 +450,6 @@ function applyFilters(wglInstance) {
     // Dehaze: a real, working simplified haze-removal model (see filterDehaze.js for
     // the honest caveat vs. Adobe's per-pixel version).
     wglInstance.filterDehaze(state.dehaze);
-    if (state.sonyLook) {
-      wglInstance.filterCurves([SONY_ALPHA_LIKE_CURVE, null, null, null]);
-    }
     if (state.contrast) {
       wglInstance.filterCurves([contrastCurvePoints(state.contrast), null, null, null]);
     }
@@ -795,10 +772,6 @@ openBtn.addEventListener('click', openFile);
 exportBtn.addEventListener('click', exportFile);
 resetBtn.addEventListener('click', () => { resetSliders(); resetCurve(); render(); });
 rotate90Btn.addEventListener('click', rotate90);
-sonyLookCheckbox.addEventListener('change', () => {
-  state.sonyLook = sonyLookCheckbox.checked;
-  scheduleRender();
-});
 
 window.__testOpenBytes = async (bytes) => {
   await processFile({ name: 'test.arw', data: bytes });
