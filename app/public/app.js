@@ -337,7 +337,7 @@ const PREVIEW_MAX_DIM = 1800; // interactive edits run against a downscaled prox
 let wgl = null;
 let canvas = null;
 let currentName = 'edited';
-let colorScienceMode = colorScienceSelect.value; // 'original' | 'stageA' | 'stageAB' | 'stageABC'
+let colorScienceMode = colorScienceSelect.value; // 'original' | 'sonyA6300'
 let activeCacheKey = null; // fileFingerprint + colorScienceMode — the rawCache's actual key
 let fullResRaw = null; // { data: Uint16Array (RGB triplets), width, height } — kept only for the final export render
 
@@ -671,9 +671,7 @@ function parseCubeLut(text) {
 }
 
 const LUT_URLS = {
-  stageA: './color-luts/stageA.cube',
-  stageAB: './color-luts/stageAB.cube',
-  stageABC: './color-luts/stageABC.cube',
+  sonyA6300: './color-luts/sonyA6300.cube',
 };
 const lutCache = new Map();
 async function loadCubeLut(mode) {
@@ -759,7 +757,7 @@ function renderSidebar() {
     } else {
       const placeholder = document.createElement('div');
       placeholder.className = 'thumb-placeholder';
-      placeholder.textContent = entry.thumbFailed ? 'no preview' : 'loading…';
+      placeholder.textContent = entry.thumbFailed ? "couldn't load" : 'loading…';
       item.appendChild(placeholder);
     }
 
@@ -777,14 +775,20 @@ function renderSidebar() {
 // file's size — reading the first ~1MB is enough on real ARWs, not the full
 // 25+MB. Blob.slice() + arrayBuffer() only touches the requested byte range on
 // disk, so this avoids the full-file read that used to dominate thumbnail time
-// on slow media (SD cards, network drives). If a truncated read doesn't yield
-// a thumbnail (e.g. a raw format/camera that stores it later in the file), we
-// escalate to larger reads and finally the whole file.
+// on slow media (SD cards, network drives). If a truncated read doesn't yield a
+// thumbnail (e.g. a raw format/camera that stores it later in the file), we
+// escalate to larger reads — but capped at the largest probe size, never all
+// the way to a full-file read. On slow storage a full read of a file whose
+// thumbnail genuinely can't be found this way is exactly the multi-second
+// stall this was built to avoid; better to show "couldn't load" than hang.
 const THUMB_PROBE_SIZES = [1_500_000, 6_000_000, 24_000_000];
 
 async function extractThumbnail(file) {
-  for (const size of THUMB_PROBE_SIZES) {
-    if (size >= file.size) break;
+  const triedSizes = new Set();
+  for (const probeSize of THUMB_PROBE_SIZES) {
+    const size = Math.min(probeSize, file.size);
+    if (triedSizes.has(size)) continue; // file is smaller than a later probe size — already tried this
+    triedSizes.add(size);
     try {
       const chunk = new Uint8Array(await file.slice(0, size).arrayBuffer());
       const raw = new LibRaw();
@@ -793,15 +797,11 @@ async function extractThumbnail(file) {
       raw.dispose();
       if (thumb && thumb.format === 'jpeg') return thumb;
     } catch {
-      // Truncated buffer wasn't enough for this file — try a bigger one.
+      // Truncated buffer wasn't enough for this file — try a bigger one, up to file.size.
     }
+    if (size === file.size) break; // that was the whole file; no larger read is possible
   }
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const raw = new LibRaw();
-  await raw.open(bytes);
-  const thumb = await raw.thumbnailData();
-  raw.dispose();
-  return thumb;
+  return null;
 }
 
 async function loadThumbnail(entry) {

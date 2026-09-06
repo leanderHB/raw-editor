@@ -1,6 +1,5 @@
-"""One-off: fit on the full dataset (no holdout — already validated via the CLI's holdout
-runs) and export Stage A / A+B / A+B+C as separate .cube files for the web app's
-side-by-side "original vs ours" comparison."""
+"""One-off: fit the full model (stage A+B+C) on the full dataset (no holdout — already
+validated via the CLI's holdout runs) and export it as the single .cube the web app ships."""
 import sys
 from pathlib import Path
 
@@ -18,6 +17,7 @@ import numpy as np
 
 pairs_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("../batch_samples")
 out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
+out_name = sys.argv[3] if len(sys.argv) > 3 else "sonyA6300.cube"
 
 pairs = find_pairs(pairs_dir)
 print(f"found {len(pairs)} pairs, fitting on all of them")
@@ -45,7 +45,5 @@ pred_ab = stage_b.apply(pred_a)
 print("fitting stage C...")
 stage_c = fit_hue_sat(pred_ab, jpeg_samples)
 
-write_cube(FullModel(stage_a), out_dir / "stageA.cube", size=33, title="stage_a")
-write_cube(FullModel(stage_a, stage_b), out_dir / "stageAB.cube", size=33, title="stage_ab")
-write_cube(FullModel(stage_a, stage_b, stage_c), out_dir / "stageABC.cube", size=33, title="stage_abc")
-print("wrote stageA.cube, stageAB.cube, stageABC.cube to", out_dir)
+write_cube(FullModel(stage_a, stage_b, stage_c), out_dir / out_name, size=33, title="sony_a6300_reverse_engineered")
+print("wrote", out_name, "to", out_dir)
