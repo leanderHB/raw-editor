@@ -344,12 +344,12 @@ let fullResRaw = null; // { data: Uint16Array (RGB triplets), width, height } �
 // Decoding a raw file is the expensive step (multi-second demosaic, see
 // decodeArwToRaw below), so keep the last few decoded results around and
 // skip re-decoding when flipping back to a sidebar image you already opened
-// this session. Bounded by count (10) AND total bytes (500MB) — whichever
+// this session. Bounded by count (10) AND total bytes (1000MB) — whichever
 // limit is hit first evicts the least-recently-used entry. A Map's iteration
 // order is insertion order, so re-inserting an entry on access is enough to
 // track LRU without a separate structure.
 const RAW_CACHE_MAX_ENTRIES = 10;
-const RAW_CACHE_MAX_BYTES = 500 * 1024 * 1024;
+const RAW_CACHE_MAX_BYTES = 1000 * 1024 * 1024;
 const rawCache = new Map(); // fileKey -> { data, width, height, meta, decodeMs, byteSize }
 let rawCacheBytes = 0;
 
