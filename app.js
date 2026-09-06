@@ -603,25 +603,45 @@ for (const key of SLIDER_KEYS) {
   });
 }
 
+// Guards against a LibRaw wasm-level hang/crash on a corrupt file never posting a worker
+// reply back — without this, an await on that call simply never settles. For the
+// thumbnail queue in particular (only a few concurrent slots) that would permanently wedge
+// a slot and eventually stall every other file's preview too, not just the bad one's.
+const LIBRAW_TIMEOUT_MS = 15000;
+function withLibRawTimeout(raw) {
+  const timer = setTimeout(() => raw.dispose(), LIBRAW_TIMEOUT_MS);
+  return () => clearTimeout(timer);
+}
+
 async function decodeArwToRaw(bytes) {
   setStatus('decoding raw…');
   const t0 = performance.now();
   const raw = new LibRaw();
-  await raw.open(bytes, {
-    useCameraWb: true,
-    outputColor: 1,
-    outputBps: 16, // keep the full 16-bit headroom — outputBps:8 would throw away
-                    // sensor precision before any editing even happens
-    userQual: 3,
-  });
-  const meta = await raw.metadata(false);
-  const img = await raw.imageData();
-  raw.dispose();
-  const t1 = performance.now();
+  const clearGuard = withLibRawTimeout(raw);
+  try {
+    await raw.open(bytes, {
+      useCameraWb: true,
+      outputColor: 1,
+      outputBps: 16, // keep the full 16-bit headroom — outputBps:8 would throw away
+                      // sensor precision before any editing even happens
+      userQual: 3,
+    });
+    const meta = await raw.metadata(false);
+    const img = await raw.imageData();
+    const t1 = performance.now();
 
-  // img.data is a Uint16Array here (3 channels, 0..65535) since outputBps:16 — no
-  // canvas/<img> roundtrip, which would silently clamp everything back to 8-bit.
-  return { data: img.data, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
+    // img.data is a Uint16Array here (3 channels, 0..65535) since outputBps:16 — no
+    // canvas/<img> roundtrip, which would silently clamp everything back to 8-bit.
+    return { data: img.data, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
+  } finally {
+    // A corrupt/unsupported file can throw from open() or metadata()/imageData() before
+    // reaching a dispose() on the happy path — without a finally, each such failure leaks
+    // this instance's Worker and WASM module. Several bad files in one folder would then
+    // pile up leaked workers until the tab degrades or crashes entirely, which is worse
+    // than any single file failing to open.
+    clearGuard();
+    raw.dispose();
+  }
 }
 
 // "Ours" color science modes need the exact input space color-profile/colorprofile/
@@ -638,18 +658,24 @@ async function decodeArwForProfile(bytes) {
   setStatus('decoding raw…');
   const t0 = performance.now();
   const raw = new LibRaw();
-  await raw.open(bytes, {
-    useCameraWb: true,
-    outputColor: 1,
-    noAutoBright: true,
-    outputBps: 16,
-    userQual: 3,
-  });
-  const meta = await raw.metadata(false);
-  const img = await raw.imageData();
-  raw.dispose();
-  const t1 = performance.now();
-  return { data: img.data, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
+  const clearGuard = withLibRawTimeout(raw);
+  try {
+    await raw.open(bytes, {
+      useCameraWb: true,
+      outputColor: 1,
+      noAutoBright: true,
+      outputBps: 16,
+      userQual: 3,
+    });
+    const meta = await raw.metadata(false);
+    const img = await raw.imageData();
+    const t1 = performance.now();
+    return { data: img.data, meta, width: img.width, height: img.height, decodeMs: t1 - t0 };
+  } finally {
+    // see decodeArwToRaw above — must run even when open()/imageData() throws or hangs
+    clearGuard();
+    raw.dispose();
+  }
 }
 
 // Parses a standard .cube 3D LUT file (see color-profile/colorprofile/export.py, which
@@ -789,15 +815,24 @@ async function extractThumbnail(file) {
     const size = Math.min(probeSize, file.size);
     if (triedSizes.has(size)) continue; // file is smaller than a later probe size — already tried this
     triedSizes.add(size);
+    const raw = new LibRaw();
+    const clearGuard = withLibRawTimeout(raw);
     try {
       const chunk = new Uint8Array(await file.slice(0, size).arrayBuffer());
-      const raw = new LibRaw();
       await raw.open(chunk);
       const thumb = await raw.thumbnailData();
-      raw.dispose();
       if (thumb && thumb.format === 'jpeg') return thumb;
     } catch {
-      // Truncated buffer wasn't enough for this file — try a bigger one, up to file.size.
+      // Truncated buffer wasn't enough for this file, or the attempt was force-disposed
+      // after LIBRAW_TIMEOUT_MS because the wasm call hung/crashed without ever replying —
+      // either way, try a bigger read or give up.
+    } finally {
+      // Must run even when open()/thumbnailData() throws (the common case for a bad probe
+      // size, or a genuinely corrupt file) — otherwise every failed attempt leaks a Worker
+      // + WASM instance, and a folder with several bad files compounds that into real
+      // resource exhaustion instead of each file just failing to preview on its own.
+      clearGuard();
+      raw.dispose();
     }
     if (size === file.size) break; // that was the whole file; no larger read is possible
   }
